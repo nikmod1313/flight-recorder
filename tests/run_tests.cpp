@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <set>
 #include <sstream>
 #include <string>
@@ -197,11 +198,11 @@ void expect_damage_reported(const Replay& r, long long most_events, const std::s
 
 void flipped_byte_is_never_trusted() {
     const uint64_t events = 2000;
-    const uintmax_t header = 8, record_bytes = 60;
+    const uintmax_t header = 8, record_bytes = 60, footer = 16;
     const fs::path log = new_log();
     expect_recorded(record("clean", log, events));
     const uintmax_t size = fs::file_size(log);
-    expect(size == header + events * record_bytes + 4, "unexpected log size " + std::to_string(size));
+    expect(size == header + events * record_bytes + footer, "unexpected log size " + std::to_string(size));
 
     std::set<uintmax_t> offsets = {0, 7, 8, 9, size - 5, size - 4, size - 1};
     for (uintmax_t i = 0; i < 67; ++i) offsets.insert(header + i * 3);  // every field of the first records
@@ -223,6 +224,38 @@ void flipped_byte_is_never_trusted() {
                                "flip at byte " + std::to_string(offset));
         fs::remove(flipped);
     }
+}
+
+void rewrite_log(const fs::path& log, const std::function<void(std::string&)>& change) {
+    std::ifstream in(log, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    change(bytes);
+    std::ofstream(log, std::ios::binary | std::ios::trunc).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+void expect_corrupt(const std::function<void(std::string&)>& change, long long events, const std::string& what) {
+    const fs::path log = new_log();
+    expect_recorded(record("clean", log, 100));
+    rewrite_log(log, change);
+    const Replay r = replay("clean", log);
+    expect(r.exit_code == 0 && r.status == "corrupt" && r.events == events && r.first == -1, what + ", got " + show(r));
+}
+
+void bytes_after_the_footer_are_corrupt() {
+    expect_corrupt([](std::string& b) { b.push_back('Z'); }, 100, "byte after the footer");
+}
+
+void damaged_length_mid_log_is_corrupt() {
+    expect_corrupt([](std::string& b) { b[8 + 60 * 10 + 3] ^= 0x40; }, 10, "huge length at record 10");
+}
+
+void removed_record_is_corrupt() {
+    expect_corrupt([](std::string& b) { b.erase(8 + 60 * 5, 60); }, 5, "record 5 removed");
+}
+
+void removed_last_record_is_corrupt() {
+    expect_corrupt([](std::string& b) { b.erase(8 + 60 * 99, 60); }, 99, "last record removed");
 }
 
 void zeroed_tail_is_reported() {  // a power cut can leave blocks of zeros, not a clean cut
@@ -294,13 +327,21 @@ Result record_lines(const std::string& lines, const fs::path& log) {
 
 void streamed_feed_replays_from_the_log_alone() {
     const fs::path log = new_log();
-    expect_recorded(record_lines("100 5\\n101 7\\n99 2\\n", log));
+    expect_recorded(record_lines("100 5\\n101 7\\n99 2\\nend\\n", log));
     expect_match(replay("clean", log), 3);
+}
+
+void dead_feed_never_looks_finished() {
+    const fs::path log = new_log();
+    const Result dead = record_lines("100 5\\n101 7\\n", log);
+    expect(dead.exit_code == 2, "feed died without its end line, exit " + std::to_string(dead.exit_code));
+    const Replay r = replay("clean", log);
+    expect(r.exit_code == 0 && r.status == "torn" && r.events == 2, "after a dead feed, got " + show(r));
 }
 
 void finished_run_is_synced_to_disk() {
     const fs::path log = new_log();
-    const Result r = record_lines("100 5\\n101 7\\n", log);
+    const Result r = record_lines("100 5\\n101 7\\nend\\n", log);
     expect_recorded(r);
     expect(r.out.find("disk_syncs=0") == std::string::npos, "run finished without a disk sync: " + r.out);
 }
@@ -317,6 +358,22 @@ void bad_feed_line_stops_the_run_and_keeps_the_prefix() {
 void unwritable_path_fails() {
     const Result r = record("clean", g_dir / "no_such_dir" / "log", 10);
     expect(r.exit_code == 2, "record to a bad path, exit " + std::to_string(r.exit_code));
+}
+
+void folder_as_log_fails() {
+    const Replay r = replay("clean", g_dir);
+    expect(r.exit_code == 2, "replay of a folder, got " + show(r));
+}
+
+void failed_setup_leaves_no_file() {
+    const fs::path dir = g_dir / "write_only";
+    fs::create_directory(dir);
+    fs::permissions(dir, fs::perms::owner_write | fs::perms::owner_exec);  // can create a file, can't sync the folder
+    const fs::path log = dir / "log";
+    const Result r = record("clean", log, 10);
+    fs::permissions(dir, fs::perms::owner_all);
+    expect(r.exit_code == 2, "folder can't be synced, exit " + std::to_string(r.exit_code));
+    expect(!fs::exists(log), "failed setup left a file behind");
 }
 
 void missing_log_fails() {
@@ -346,14 +403,21 @@ int main(int argc, char** argv) {
         {"cut_log_is_torn_at_every_sampled_offset", cut_log_is_torn_at_every_sampled_offset},
         {"crash_mid_record_leaves_a_replayable_prefix", crash_mid_record_leaves_a_replayable_prefix},
         {"flipped_byte_is_never_trusted", flipped_byte_is_never_trusted},
+        {"bytes_after_the_footer_are_corrupt", bytes_after_the_footer_are_corrupt},
+        {"damaged_length_mid_log_is_corrupt", damaged_length_mid_log_is_corrupt},
+        {"removed_record_is_corrupt", removed_record_is_corrupt},
+        {"removed_last_record_is_corrupt", removed_last_record_is_corrupt},
         {"zeroed_tail_is_reported", zeroed_tail_is_reported},
         {"kill_at_random_moments_leaves_a_replayable_prefix", kill_at_random_moments_leaves_a_replayable_prefix},
         {"full_disk_fails_loudly", full_disk_fails_loudly},
         {"existing_recording_is_never_overwritten", existing_recording_is_never_overwritten},
         {"streamed_feed_replays_from_the_log_alone", streamed_feed_replays_from_the_log_alone},
         {"finished_run_is_synced_to_disk", finished_run_is_synced_to_disk},
+        {"dead_feed_never_looks_finished", dead_feed_never_looks_finished},
         {"bad_feed_line_stops_the_run_and_keeps_the_prefix", bad_feed_line_stops_the_run_and_keeps_the_prefix},
         {"unwritable_path_fails", unwritable_path_fails},
+        {"folder_as_log_fails", folder_as_log_fails},
+        {"failed_setup_leaves_no_file", failed_setup_leaves_no_file},
         {"missing_log_fails", missing_log_fails},
     };
 

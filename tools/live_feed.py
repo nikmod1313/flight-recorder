@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streams public Binance trades to stdout as lines of "price qty".
+"""Streams public Binance trades to stdout as lines of "price qty", then "end".
 
 Prices and quantities are scaled by 1e8 into exact integers. Uses only the
 standard library. No account or key is needed: this is public market data.
@@ -119,6 +119,7 @@ def main():
     except (FeedError, OSError, ValueError, KeyError) as error:
         print(f"feed failed after {events} events: {error}", file=sys.stderr)
         return 1
+    print("end", flush=True)  # only a healthy feed says this, so a dead feed can't look finished
     print(f"feed: {events} events, {missed} missed, busiest second {busiest_second}", file=sys.stderr)
     return 0
 

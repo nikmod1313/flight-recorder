@@ -45,7 +45,7 @@ enum class ReplayStatus {
     Match,     // the log is complete and every event matched
     Diverged,  // an event differed; first_divergence_seq says which
     TornTail,  // every readable event matched, but the log just stops
-    Corrupt,   // every event before the damage matched, then bytes failed their checksum
+    Corrupt,   // every event before the damage matched, then the log failed a check
 };
 
 struct ReplayReport {
@@ -66,7 +66,7 @@ RecordReport record_run(TickSource& source, Strategy& strategy, const std::strin
 // An event diverges if its output, its state hash, or the inputs it read from
 // the gate differ from the recording. Stops at the first divergence.
 // A damaged log is a report, not an exception. Throws std::runtime_error only
-// if log_path cannot be opened.
+// if log_path cannot be opened or is not a regular file.
 ReplayReport replay_run(Strategy& strategy, const std::string& log_path);
 
 }  // namespace fr

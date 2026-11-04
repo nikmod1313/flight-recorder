@@ -1,16 +1,19 @@
 // The Flight Recorder core. The contract is in include/fr/flight_recorder.h.
 //
-// A log is a header, a run of records, then one end marker:
+// A log is a header, a run of records, then one sealed footer:
 //   [kMagic]
 //   [length u32][tick][input count u32][inputs u64 ...][event hash u64][crc u32]
-//   [kEndMarker u32]
+//   [kEndMarker u32][event count u64][crc u32]
 // length counts the bytes after itself. crc covers the length and everything
-// up to the crc, so damaged bytes are caught instead of being trusted. The end
-// marker is the only proof that a run finished, so a log without it is
-// incomplete even if every record is whole.
+// up to the crc, so damaged bytes are caught instead of being trusted. The
+// footer is the only proof that a run finished, so a log without it is
+// incomplete even if every record is whole. Its event count catches records
+// removed from the end.
 #include "fr/flight_recorder.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #if defined(__ARM_FEATURE_CRC32) && !defined(FR_SOFT_CRC)
 #include <arm_acle.h>
@@ -22,8 +25,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <fstream>
-#include <iterator>
 #include <random>
 #include <stdexcept>
 #include <thread>
@@ -41,6 +42,7 @@ constexpr char kMagic[8] = "FRLOG01";
 constexpr auto kSyncInterval = std::chrono::milliseconds(100);
 constexpr uint32_t kCrcStart = 0xFFFFFFFFu;
 constexpr size_t kFixedRecordBytes = sizeof(Tick) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t);
+constexpr size_t kFooterBytes = sizeof(uint64_t) + sizeof(uint32_t);  // what follows kEndMarker
 
 [[noreturn]] void fail(const std::string& what, const std::string& path) {
     throw std::runtime_error(what + " " + path + ": " + std::strerror(errno));
@@ -83,17 +85,21 @@ uint32_t crc32c(uint32_t crc, const void* data, size_t bytes) {
 
 // Forces written data onto the disk itself. On macOS plain fsync stops at the
 // drive's own cache, so a power cut could still lose the data.
-bool sync_to_disk(int fd) {
-#ifdef FR_TEST_SYNC_FAILS
-    (void)fd;
-    errno = EIO;
-    return false;
-#else
+bool full_sync(int fd) {
 #ifdef F_FULLFSYNC
     if (::fcntl(fd, F_FULLFSYNC) == 0) return true;
     if (errno != ENOTSUP && errno != EINVAL) return false;  // some file systems lack it
 #endif
     return ::fsync(fd) == 0;
+}
+
+bool sync_log(int fd) {
+#ifdef FR_TEST_SYNC_FAILS
+    (void)fd;
+    errno = EIO;
+    return false;
+#else
+    return full_sync(fd);
 #endif
 }
 
@@ -103,7 +109,7 @@ void sync_parent_directory(const std::string& path) {
     const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash + 1);
     const int fd = ::open(dir.c_str(), O_RDONLY);
     if (fd < 0) fail("cannot open directory of", path);
-    const bool synced = ::fsync(fd) == 0;
+    const bool synced = full_sync(fd);
     const int error = errno;
     ::close(fd);
     errno = error;
@@ -119,8 +125,14 @@ public:
     explicit LogWriter(const std::string& path) : path_(path), ring_(kRingBytes) {
         fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
         if (fd_ < 0) fail("cannot create log", path_);
-        sync_parent_directory(path_);
-        drain_thread_ = std::thread([this] { drain(); });
+        try {
+            sync_parent_directory(path_);
+            drain_thread_ = std::thread([this] { drain(); });
+        } catch (...) {  // no destructor runs here, and an empty log would block a retry
+            ::close(fd_);
+            ::unlink(path_.c_str());  // safe: O_EXCL means this run created it
+            throw;
+        }
     }
 
     ~LogWriter() {
@@ -219,7 +231,7 @@ private:
 
     bool timed_sync() {
         const auto start = std::chrono::steady_clock::now();
-        if (!sync_to_disk(fd_)) {  // never retried: a failed sync may have dropped the data
+        if (!sync_log(fd_)) {  // never retried: a failed sync may have dropped the data
             drain_error_.store(errno, std::memory_order_release);
             return false;
         }
@@ -322,11 +334,46 @@ private:
     bool overran_ = false;
 };
 
-std::vector<char> read_file(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) fail("cannot open log", path);
-    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-}
+// The log mapped straight into memory. The OS pages it in as replay walks it,
+// so a log can be larger than RAM.
+class MappedLog {
+public:
+    explicit MappedLog(const std::string& path) {
+        const int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd < 0) fail("cannot open log", path);
+        struct stat info;
+        const bool have_info = ::fstat(fd, &info) == 0;
+        if (!have_info || !S_ISREG(info.st_mode)) {
+            const int error = have_info ? EINVAL : errno;
+            ::close(fd);
+            errno = error;
+            fail("not a log file:", path);
+        }
+        size_ = static_cast<size_t>(info.st_size);
+        if (size_ > 0) {
+            void* mapped = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
+            const int error = errno;
+            ::close(fd);
+            errno = error;
+            if (mapped == MAP_FAILED) fail("cannot map log", path);
+            data_ = static_cast<const char*>(mapped);
+        } else {
+            ::close(fd);
+        }
+    }
+    ~MappedLog() {
+        if (data_) ::munmap(const_cast<char*>(data_), size_);
+    }
+    MappedLog(const MappedLog&) = delete;
+    MappedLog& operator=(const MappedLog&) = delete;
+
+    const char* begin() const { return data_; }
+    const char* end() const { return data_ + size_; }
+
+private:
+    const char* data_ = nullptr;
+    size_t size_ = 0;
+};
 
 template <typename T>
 T read_at(const char* from) {
@@ -372,7 +419,11 @@ RecordReport record_run(TickSource& source, Strategy& strategy, const std::strin
         ++report.events;
     }
 
+    uint32_t crc = crc32c(kCrcStart, &kEndMarker, sizeof kEndMarker);
+    crc = ~crc32c(crc, &report.events, sizeof report.events);
     log.append(&kEndMarker, sizeof kEndMarker);
+    log.append(&report.events, sizeof report.events);
+    log.append(&crc, sizeof crc);
     log.commit();
     log.finish();
     report.ring_full_waits = log.full_waits();
@@ -382,9 +433,9 @@ RecordReport record_run(TickSource& source, Strategy& strategy, const std::strin
 }
 
 ReplayReport replay_run(Strategy& strategy, const std::string& log_path) {
-    const std::vector<char> log = read_file(log_path);
-    const char* pos = log.data();
-    const char* const end = pos + log.size();
+    const MappedLog log(log_path);
+    const char* pos = log.begin();
+    const char* const end = log.end();
 
     ReplayGate gate;
     ReplayReport report;
@@ -402,14 +453,19 @@ ReplayReport replay_run(Strategy& strategy, const std::string& log_path) {
         pos += sizeof length;
 
         if (length == kEndMarker) {
-            if (pos == end) report.status = ReplayStatus::Match;
+            if (static_cast<size_t>(end - pos) < kFooterBytes) return report;
+            const uint64_t events = read_at<uint64_t>(pos);
+            const uint32_t crc = ~crc32c(crc32c(kCrcStart, &length, sizeof length), pos, sizeof events);
+            const bool sound = crc == read_at<uint32_t>(pos + sizeof events) && events == report.events_replayed &&
+                               pos + kFooterBytes == end;
+            report.status = sound ? ReplayStatus::Match : ReplayStatus::Corrupt;
+            return report;
+        }
+        if (length < kFixedRecordBytes || length > kRingBytes || (length - kFixedRecordBytes) % sizeof(uint64_t) != 0) {
+            report.status = ReplayStatus::Corrupt;  // no real record has this length
             return report;
         }
         if (length > static_cast<size_t>(end - pos)) return report;
-        if (length < kFixedRecordBytes) {
-            report.status = ReplayStatus::Corrupt;
-            return report;
-        }
 
         const size_t checked_bytes = length - sizeof(uint32_t);
         const uint32_t crc = ~crc32c(crc32c(kCrcStart, &length, sizeof length), pos, checked_bytes);
@@ -421,6 +477,10 @@ ReplayReport replay_run(Strategy& strategy, const std::string& log_path) {
         }
 
         const Tick tick = read_at<Tick>(pos);
+        if (tick.seq != report.events_replayed) {  // a record is missing or out of place
+            report.status = ReplayStatus::Corrupt;
+            return report;
+        }
         const char* const inputs = pos + sizeof(Tick) + sizeof count;
         const uint64_t recorded_hash = read_at<uint64_t>(pos + checked_bytes - sizeof(uint64_t));
         pos += length;

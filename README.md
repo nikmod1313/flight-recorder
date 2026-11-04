@@ -44,7 +44,7 @@ flowchart LR
 [magic "FRLOG01"]
 [length][tick][input count][inputs ...][event hash][crc]    one record per event
 ...
-[end marker 0xFFFFFFFF]
+[end marker 0xFFFFFFFF][event count][crc]                  the footer
 ```
 
 | Field | Size | Why it's there |
@@ -56,7 +56,7 @@ flowchart LR
 | Inputs | 8 bytes each | The exact clock and random values handed out |
 | Event hash | 8 bytes | The fingerprint replay compares against |
 | CRC | 4 bytes | Catches damaged bytes |
-| End marker | 4 bytes | The only proof that the run finished |
+| Footer | 16 bytes | End marker, event count and CRC: the only proof that the run finished, and that no records were removed |
 
 A normal record is 60 bytes.
 
@@ -67,7 +67,7 @@ A normal record is 60 bytes.
 | `Match` | The log is complete and every event matched |
 | `Diverged` | An event differed, and the report names the first one |
 | `TornTail` | Every readable event matched, but the log just stops |
-| `Corrupt` | Every event before the damage matched, then bytes failed their checksum |
+| `Corrupt` | Every event before the damage matched, then the log failed a check |
 
 ### What each failure can lose
 
@@ -105,7 +105,7 @@ build/fr_tool replay clean run.log 0
 | `tests/feed.h` | Synthetic feed, and a reader for streamed trades |
 | `tests/strategies.h` | The toy strategy, planted leaks and a crash |
 | `tests/fr_tool.cpp` | Runs one record or replay as its own process |
-| `tests/run_tests.cpp` | The 21 black-box tests |
+| `tests/run_tests.cpp` | The 28 black-box tests |
 | `tests/bench_record.cpp` | The speed test |
 
 ## Decisions
@@ -141,6 +141,10 @@ build/fr_tool replay clean run.log 0
 | Never overwrite an existing log | A black box must not be wiped by accident, so the file is opened with `O_EXCL`. |
 | A damaged log is a report, not an exception | A damaged log is exactly when you most want to know what can still be saved. |
 | A garbled feed line stops the run | Guessing what it meant would record a guess as truth. |
+| A healthy feed ends with an `end` line | Without it, a dead feed would look like a finished run. |
+| Check sequence numbers and the footer's event count | Removed records must be caught, even for a strategy with no memory. |
+| Memory-map the log for replay | A log can be larger than RAM, and replay runs much faster. |
+| Delete the empty log if setup fails | Otherwise it would block a retry, because logs are never overwritten. |
 
 ### Speed
 
@@ -264,9 +268,21 @@ We ran it twice because the worst events in run 1 looked alarming. Run 2 was abo
 
 The slowest sync took up to 8.6 ms, and the trading thread didn't wait for it. Recording does cause more small hiccups than no recording, though one no-recording round also had a burst of slow events, so part of this is machine noise.
 
+### 8. Code review fixes
+
+- **Why:** a review of the code found seven problems, each reproduced first. A dead feed looked like a finished run, a folder passed as a torn log, and a failed setup blocked retries. Some damage had the wrong label, removed records were caught only by luck, and replay used nearly three times the log's size in memory.
+- **Result:** all fixed, and the speed kill test still passes at 83 ns (p99) and 167 ns (p99.9).
+
+| Replaying a 300 MB log | Before | After |
+| --- | --- | --- |
+| Time | 1.24 s | 0.08 s |
+| Peak resident memory | 839 MB | 302 MB, reclaimable by the OS |
+
+**Still open:** a cut-off last line in a feed is believed, so a truncated trade could be recorded before the run stops.
+
 ## Tests
 
-`make check` runs the 21 tests below on two ring sizes, 16 MB and 4 KB. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
+`make check` runs the 28 tests below on two ring sizes, 16 MB and 4 KB. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
 
 ### Replay
 
@@ -277,6 +293,7 @@ The slowest sync took up to 8.6 ms, and the trading thread didn't wait for it. R
 | `empty_run_matches` | A run with no events is still a valid run |
 | `large_run_wraps_the_ring` | 56 MB of events must wrap the ring correctly |
 | `streamed_feed_replays_from_the_log_alone` | A streamed run needs nothing but its log |
+| `dead_feed_never_looks_finished` | A feed that stops without its end line must not produce a finished log |
 
 ### Planted leaks
 
@@ -297,6 +314,10 @@ Each runs at events 0, 7,777 and 9,999. Replay must name that exact event.
 | `cut_log_is_torn_at_every_sampled_offset` | A log cut anywhere must never count as complete |
 | `flipped_byte_is_never_trusted` | About 370 single-byte flips must all be reported, never trusted |
 | `zeroed_tail_is_reported` | A power cut can leave zeros, not a clean cut |
+| `bytes_after_the_footer_are_corrupt` | Extra bytes mean damage, not a torn log |
+| `damaged_length_mid_log_is_corrupt` | An impossible length is damage, even though the log carries on |
+| `removed_record_is_corrupt` | A missing middle record must be named as damage |
+| `removed_last_record_is_corrupt` | A missing last record must be caught by the event count |
 | `crash_mid_record_leaves_a_replayable_prefix` | A crash keeps everything before it |
 | `kill_at_random_moments_leaves_a_replayable_prefix` | `kill -9` at 8 moments must leave a clean prefix |
 
@@ -309,6 +330,8 @@ Each runs at events 0, 7,777 and 9,999. Replay must name that exact event.
 | `existing_recording_is_never_overwritten` | Recording twice must not destroy a log |
 | `bad_feed_line_stops_the_run_and_keeps_the_prefix` | A garbled line stops the run, and earlier events survive |
 | `unwritable_path_fails` | A bad path is an error |
+| `folder_as_log_fails` | A folder isn't a log |
+| `failed_setup_leaves_no_file` | A failed start must not block a retry |
 | `missing_log_fails` | A missing log is an error |
 
 ### Extra checks
@@ -322,7 +345,7 @@ Each runs at events 0, 7,777 and 9,999. Replay must name that exact event.
 
 ### Testing the tests
 
-A test that can't fail proves nothing, so we planted 14 bugs, in private copies of the code or a throwaway engine, and each one had to be caught.
+A test that can't fail proves nothing, so we planted 19 bugs, in private copies of the code or a throwaway engine, and each one had to be caught.
 
 | Planted bug | Caught by |
 | --- | --- |
@@ -340,6 +363,11 @@ A test that can't fail proves nothing, so we planted 14 bugs, in private copies 
 | Skip the header check | `flipped_byte_is_never_trusted` |
 | Skip the final sync | `finished_run_is_synced_to_disk` |
 | Hide a sync error | `test-sync-failure` |
+| Skip the sequence check | `removed_record_is_corrupt` |
+| Skip the event count check | `removed_last_record_is_corrupt` |
+| Allow bytes after the footer | `bytes_after_the_footer_are_corrupt` |
+| Leave the empty log after a failed setup | `failed_setup_leaves_no_file` |
+| Skip the length check | `damaged_length_mid_log_is_corrupt` |
 
 This found five real faults in the tests themselves, all fixed:
 
@@ -348,6 +376,8 @@ This found five real faults in the tests themselves, all fixed:
 3. The iteration leak vanished under the sanitizer, because addresses stopped changing.
 4. A hang stalled the tests forever, so we added the watchdog.
 5. A full ring was never reached, so the wait-when-full rule was untested until the 4 KB run.
+
+A sixth planted bug, removing the regular-file check, passed every test. That isn't a test gap: `mmap` refuses a folder by itself, so the check only adds a clearer error.
 
 ## What isn't proven yet
 

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -9,16 +10,18 @@
 
 namespace fr_test {
 
-// Reads lines of "price qty" from stdin. The feed ends at end of input. A bad
-// line stops the run: a guess at what it meant would be recorded as truth.
+// Reads lines of "price qty" from stdin. A healthy feed ends with a line saying
+// "end". If input stops without it, the feed died, so the run must not look
+// finished. A bad line stops the run too: a guess at what it meant would be
+// recorded as truth.
 class LineFeed final : public fr::TickSource {
 public:
     bool next(fr::Tick& out) override {
         char line[128];
         if (!std::fgets(line, sizeof line, stdin)) {
-            if (std::ferror(stdin)) throw std::runtime_error("cannot read feed");
-            return false;
+            throw std::runtime_error(std::ferror(stdin) ? "cannot read feed" : "feed stopped without its end line");
         }
+        if (std::strcmp(line, "end\n") == 0) return false;
         long long price = 0, qty = 0;
         int used = 0;
         if (std::sscanf(line, "%lld %lld %n", &price, &qty, &used) != 2 || line[used] != '\0') {
