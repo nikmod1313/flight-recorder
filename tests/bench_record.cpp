@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <string>
@@ -16,8 +17,8 @@
 
 namespace {
 
-constexpr uint64_t kEvents = 1'000'000;
-constexpr int kRounds = 5;
+uint64_t g_events = 1'000'000;
+int g_rounds = 5;
 
 class Stamped final : public fr_test::Clean {
 public:
@@ -76,7 +77,7 @@ void print_slow_gaps(const char* name, const std::vector<uint64_t>& stamps) {
 }
 
 Percentiles run_baseline(std::vector<uint64_t>& stamps) {
-    fr_test::SyntheticFeed feed(kEvents);
+    fr_test::SyntheticFeed feed(g_events);
     Stamped strategy(stamps);
     DirectGate gate;
     fr::Tick tick;
@@ -86,7 +87,7 @@ Percentiles run_baseline(std::vector<uint64_t>& stamps) {
 
 Percentiles run_recording(std::vector<uint64_t>& stamps, const std::filesystem::path& log) {
     std::filesystem::remove(log);
-    fr_test::SyntheticFeed feed(kEvents);
+    fr_test::SyntheticFeed feed(g_events);
     Stamped strategy(stamps);
     const fr::RecordReport report = fr::record_run(feed, strategy, log.string());
     std::printf("ring full: %llu waits, disk syncs: %llu, slowest sync: %llu ns\n",
@@ -107,13 +108,15 @@ void print(const char* name, int round, const Percentiles& p) {
 
 int main(int argc, char** argv) {
     const std::filesystem::path build = argc > 1 ? argv[1] : "build";
+    if (argc > 2) g_events = std::strtoull(argv[2], nullptr, 10);
+    if (argc > 3) g_rounds = std::atoi(argv[3]);
     const std::filesystem::path log = build / "bench.log";
-    std::vector<uint64_t> stamps(kEvents, 0);  // touched up front so page faults stay out of the timing
+    std::vector<uint64_t> stamps(g_events, 0);  // touched up front so page faults stay out of the timing
 
     std::printf("SYNTHETIC: %llu made-up events per round. Timer tick is about 42 ns on Apple silicon.\n",
-                static_cast<unsigned long long>(kEvents));
+                static_cast<unsigned long long>(g_events));
     std::vector<double> added_p99, added_p999, worst_base, worst_rec;
-    for (int round = 1; round <= kRounds; ++round) {
+    for (int round = 1; round <= g_rounds; ++round) {
         const Percentiles base = run_baseline(stamps);
         print("baseline", round, base);
         print_slow_gaps("baseline", stamps);

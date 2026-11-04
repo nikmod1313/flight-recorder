@@ -8,7 +8,7 @@ endif
 
 HEADERS := include/fr/flight_recorder.h tests/feed.h tests/strategies.h
 
-.PHONY: all test test-small-ring test-sync-failure test-crc-match check bench clean
+.PHONY: all test test-small-ring test-sync-failure test-crc-match check bench bench-long clean
 all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/bench_record
 
 $(BUILD)/core.o: $(CORE) include/fr/flight_recorder.h
@@ -51,6 +51,10 @@ check: test test-small-ring test-sync-failure test-crc-match
 
 bench: $(BUILD)/bench_record
 	$(BUILD)/bench_record $(BUILD)
+
+# Long enough for disk syncs to happen during the run. Writes about 1.2 GB a round.
+bench-long: $(BUILD)/bench_record
+	$(BUILD)/bench_record $(BUILD) 20000000 3
 
 clean:
 	rm -rf $(BUILD)
