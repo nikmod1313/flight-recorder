@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "fr/flight_recorder.h"
+#include "real_ravi.h"
 
 namespace fr_test {
 
@@ -23,6 +24,9 @@ public:
         fold(gate.random_u64());
         fold(static_cast<uint64_t>(tick.price));
         fold(static_cast<uint64_t>(tick.qty));
+        fold(static_cast<uint64_t>(tick.side));
+        fold(static_cast<uint64_t>(tick.best_bid));
+        fold(static_cast<uint64_t>(tick.best_ask));
         return static_cast<int64_t>(state_ >> 1);
     }
     uint64_t state_hash() const override { return state_; }
@@ -123,6 +127,7 @@ private:
 
 inline std::unique_ptr<fr::Strategy> make_strategy(const std::string& name, uint64_t at, bool replaying) {
     if (name == "clean") return std::make_unique<Clean>();
+    if (name == "ravi") return std::make_unique<fr_ravi::RealRavi>();
     if (name == "wall_clock") return std::make_unique<WallClockLeak>(at);
     if (name == "random") return std::make_unique<RandomLeak>(at);
     if (name == "iteration") return std::make_unique<IterationLeak>(at);

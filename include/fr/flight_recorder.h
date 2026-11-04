@@ -9,8 +9,11 @@ namespace fr {
 
 struct Tick {
     uint64_t seq;  // 0, 1, 2, ... in arrival order
-    int64_t price;
-    int64_t qty;
+    int64_t price;     // the trade's price; 0 for a book update
+    int64_t qty;       // the trade's size; 0 for a book update
+    int64_t side;      // who started the trade: +1 buyer, -1 seller, 0 a book update
+    int64_t best_bid;  // the highest price anyone will pay right now
+    int64_t best_ask;  // the lowest price anyone will accept right now
 };
 
 class TickSource {

@@ -10,7 +10,7 @@
 
 namespace fr_test {
 
-// Reads lines of "price qty" from stdin. A healthy feed ends with a line saying
+// Reads lines of "price qty side bid ask" from stdin. A healthy feed ends with a line saying
 // "end". If input stops without it, the feed died, so the run must not look
 // finished. A bad line stops the run too: a guess at what it meant would be
 // recorded as truth.
@@ -22,12 +22,13 @@ public:
             throw std::runtime_error(std::ferror(stdin) ? "cannot read feed" : "feed stopped without its end line");
         }
         if (std::strcmp(line, "end\n") == 0) return false;
-        long long price = 0, qty = 0;
+        long long price = 0, qty = 0, side = 0, bid = 0, ask = 0;
         int used = 0;
-        if (std::sscanf(line, "%lld %lld %n", &price, &qty, &used) != 2 || line[used] != '\0') {
+        if (std::sscanf(line, "%lld %lld %lld %lld %lld %n", &price, &qty, &side, &bid, &ask, &used) != 5 ||
+            line[used] != '\0') {
             throw std::runtime_error("bad feed line: " + std::string(line));
         }
-        out = {seq_++, price, qty};
+        out = {seq_++, price, qty, side, bid, ask};
         return true;
     }
 
@@ -36,6 +37,8 @@ private:
 };
 
 class SyntheticFeed final : public fr::TickSource {
+    static constexpr int64_t kCent = 1'000'000;
+
 public:
     explicit SyntheticFeed(uint64_t events) : events_(events) {}
 
@@ -44,8 +47,11 @@ public:
         x_ ^= x_ << 13;
         x_ ^= x_ >> 7;
         x_ ^= x_ << 17;
-        price_ += static_cast<int64_t>(x_ % 5) - 2;
-        out = {seq_++, price_, static_cast<int64_t>(x_ >> 54) + 1};
+        price_ += (static_cast<int64_t>(x_ % 5) - 2) * kCent;
+        const int64_t side = static_cast<int64_t>((x_ >> 8) % 3) - 1;
+        const int64_t trade_price = side == 0 ? 0 : price_ + side * kCent;
+        const int64_t qty = side == 0 ? 0 : static_cast<int64_t>(x_ >> 40);
+        out = {seq_++, trade_price, qty, side, price_ - kCent, price_ + kCent};
         return true;
     }
 
@@ -53,7 +59,7 @@ private:
     uint64_t events_;
     uint64_t seq_ = 0;
     uint64_t x_ = 0x9E3779B97F4A7C15ull;
-    int64_t price_ = 1'000'000;
+    int64_t price_ = 7'800'000'000'000;
 };
 
 }  // namespace fr_test

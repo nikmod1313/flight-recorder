@@ -27,6 +27,17 @@ const char* status_name(fr::ReplayStatus status) {
     return "unknown";
 }
 
+// Real Ravi's day, in dollars. A replay must print exactly the same line.
+void print_day(const fr::Strategy& strategy) {
+    const auto* ravi = dynamic_cast<const fr_ravi::RealRavi*>(&strategy);
+    if (!ravi) return;
+    std::printf("ravi fills=%lld lots=%lld most_lots=%lld gross_usd=%.5f fees_usd=%.5f net_usd=%.5f stopped=%d\n",
+                static_cast<long long>(ravi->fills()), static_cast<long long>(ravi->lots()),
+                static_cast<long long>(ravi->max_lots()), static_cast<double>(ravi->gross_pnl()) / 100'000.0,
+                static_cast<double>(ravi->fees()) / 100'000.0, static_cast<double>(ravi->net_pnl()) / 100'000.0,
+                ravi->stopped() ? 1 : 0);
+}
+
 int usage() {
     std::fprintf(stderr, "usage: fr_tool record|replay <strategy> <log> ...\n");
     return 64;
@@ -44,6 +55,7 @@ int run(int argc, char** argv) {
                     static_cast<unsigned long long>(report.ring_full_waits),
                     static_cast<unsigned long long>(report.disk_syncs),
                     static_cast<unsigned long long>(report.max_sync_ns));
+        print_day(*live);
         return 0;
     }
     if (argc < 5) return usage();
@@ -60,6 +72,7 @@ int run(int argc, char** argv) {
         std::printf("status=%s events=%llu first=%lld\n", status_name(report.status),
                     static_cast<unsigned long long>(report.events_replayed),
                     report.first_divergence_seq ? static_cast<long long>(*report.first_divergence_seq) : -1);
+        print_day(*strategy);
         return 0;
     }
 
@@ -75,6 +88,7 @@ int run(int argc, char** argv) {
     fr_test::SyntheticFeed feed(std::strtoull(argv[4], nullptr, 10));
     fr::RecordReport report = fr::record_run(feed, *strategy, argv[3]);
     std::printf("events=%llu\n", static_cast<unsigned long long>(report.events));
+    print_day(*strategy);
     return 0;
 }
 

@@ -1,15 +1,15 @@
 CXX      ?= clang++
 BUILD    ?= build
 CORE     ?= src/flight_recorder.cpp
-CXXFLAGS ?= -std=c++20 -O2 -g -Wall -Wextra -Wpedantic -Iinclude -Itests
+CXXFLAGS ?= -std=c++20 -O2 -g -Wall -Wextra -Wpedantic -Iinclude -Itests -Istrategies
 ifdef SAN
 CXXFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
 endif
 
-HEADERS := include/fr/flight_recorder.h tests/feed.h tests/strategies.h
+HEADERS := include/fr/flight_recorder.h tests/feed.h tests/strategies.h strategies/real_ravi.h
 
 .PHONY: all test test-small-ring test-sync-failure test-crc-match check bench bench-long clean
-all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/bench_record
+all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests $(BUILD)/bench_record
 
 $(BUILD)/core.o: $(CORE) include/fr/flight_recorder.h
 	@mkdir -p $(BUILD)
@@ -25,7 +25,12 @@ $(BUILD)/run_tests: tests/run_tests.cpp
 $(BUILD)/bench_record: tests/bench_record.cpp $(BUILD)/core.o $(HEADERS)
 	$(CXX) $(CXXFLAGS) tests/bench_record.cpp $(BUILD)/core.o -o $@
 
-test: $(BUILD)/fr_tool $(BUILD)/run_tests
+$(BUILD)/ravi_tests: tests/ravi_tests.cpp $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) tests/ravi_tests.cpp -o $@
+
+test: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests
+	$(BUILD)/ravi_tests
 	$(BUILD)/run_tests $(BUILD)
 
 # A tiny ring fills constantly, so this proves the full-ring wait really works.

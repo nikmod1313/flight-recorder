@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Streams public Binance trades to stdout as lines of "price qty", then "end".
+"""Streams public Binance trades and best quotes to stdout, then "end".
 
-Prices and quantities are scaled by 1e8 into exact integers. Uses only the
-standard library. No account or key is needed: this is public market data.
+Each line is "price qty side bid ask". side is +1 if a buyer started the trade,
+-1 if a seller did, and 0 for a book update, which has no price or qty.
+Numbers are scaled by 1e8 into exact integers. Uses only the standard library.
+No account or key is needed: this is public market data.
 
   python3 tools/live_feed.py --symbol btcusdt --seconds 60 | build/fr_tool record-stdin clean run.log
 """
@@ -27,6 +29,10 @@ class FeedError(Exception):
     pass
 
 
+def scaled(text):
+    return int(Decimal(text) * SCALE)
+
+
 def read_exact(sock, count):
     data = b""
     while len(data) < count:
@@ -43,7 +49,7 @@ def connect(symbol):
     key = base64.b64encode(os.urandom(16)).decode()
     sock.sendall(
         (
-            f"GET /ws/{symbol}@trade HTTP/1.1\r\nHost: {HOST}\r\nUpgrade: websocket\r\n"
+            f"GET /stream?streams={symbol}@trade/{symbol}@bookTicker HTTP/1.1\r\nHost: {HOST}\r\nUpgrade: websocket\r\n"
             f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         ).encode()
     )
@@ -100,14 +106,22 @@ def main():
     try:
         sock = connect(args.symbol)
         sock.settimeout(30)
+        bid = ask = None
         for message in messages(sock):
-            trade = json.loads(message)
-            if last_id is not None and trade["t"] != last_id + 1:
-                missed += trade["t"] - last_id - 1
-            last_id = trade["t"]
-            price = int(Decimal(trade["p"]) * SCALE)
-            qty = int(Decimal(trade["q"]) * SCALE)
-            print(price, qty, flush=True)
+            wrapper = json.loads(message)
+            data = wrapper["data"]
+            if wrapper["stream"].endswith("@bookTicker"):
+                bid, ask = scaled(data["b"]), scaled(data["a"])
+                line = (0, 0, 0, bid, ask)
+            else:
+                if last_id is not None and data["t"] != last_id + 1:
+                    missed += data["t"] - last_id - 1
+                last_id = data["t"]
+                if bid is None:
+                    continue  # Ravi needs a book before a trade means anything
+                side = -1 if data["m"] else 1  # m means the buyer was waiting, so a seller started it
+                line = (scaled(data["p"]), scaled(data["q"]), side, bid, ask)
+            print(*line, flush=True)
 
             events += 1
             now = int(time.monotonic())

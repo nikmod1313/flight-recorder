@@ -126,6 +126,22 @@ void large_run_wraps_the_ring() {
     expect_match(replay("clean", log), 1000000);
 }
 
+std::string day_line(const std::string& out) {
+    const auto at = out.find("ravi ");
+    return at == std::string::npos ? "" : out.substr(at);
+}
+
+void real_ravi_replays_to_the_same_cent() {
+    const fs::path log = new_log();
+    const Result recorded = record("ravi", log, 200000);
+    expect_recorded(recorded);
+    expect(recorded.out.find("fills=0 ") == std::string::npos, "Ravi never traded, so this proves little");
+    const Result replayed = tool("replay ravi " + log.string() + " 0");
+    expect(replayed.out.find("status=match events=200000") != std::string::npos, "replay: " + replayed.out);
+    expect(!day_line(recorded.out).empty() && day_line(recorded.out) == day_line(replayed.out),
+           "day differs: " + recorded.out + " vs " + replayed.out);
+}
+
 void empty_run_matches() {
     const fs::path log = new_log();
     expect_recorded(record("clean", log, 0));
@@ -198,7 +214,7 @@ void expect_damage_reported(const Replay& r, long long most_events, const std::s
 
 void flipped_byte_is_never_trusted() {
     const uint64_t events = 2000;
-    const uintmax_t header = 8, record_bytes = 60, footer = 16;
+    const uintmax_t header = 8, record_bytes = 84, footer = 16;
     const fs::path log = new_log();
     expect_recorded(record("clean", log, events));
     const uintmax_t size = fs::file_size(log);
@@ -247,15 +263,15 @@ void bytes_after_the_footer_are_corrupt() {
 }
 
 void damaged_length_mid_log_is_corrupt() {
-    expect_corrupt([](std::string& b) { b[8 + 60 * 10 + 3] ^= 0x40; }, 10, "huge length at record 10");
+    expect_corrupt([](std::string& b) { b[8 + 84 * 10 + 3] ^= 0x40; }, 10, "huge length at record 10");
 }
 
 void removed_record_is_corrupt() {
-    expect_corrupt([](std::string& b) { b.erase(8 + 60 * 5, 60); }, 5, "record 5 removed");
+    expect_corrupt([](std::string& b) { b.erase(8 + 84 * 5, 84); }, 5, "record 5 removed");
 }
 
 void removed_last_record_is_corrupt() {
-    expect_corrupt([](std::string& b) { b.erase(8 + 60 * 99, 60); }, 99, "last record removed");
+    expect_corrupt([](std::string& b) { b.erase(8 + 84 * 99, 84); }, 99, "last record removed");
 }
 
 void zeroed_tail_is_reported() {  // a power cut can leave blocks of zeros, not a clean cut
@@ -327,13 +343,13 @@ Result record_lines(const std::string& lines, const fs::path& log) {
 
 void streamed_feed_replays_from_the_log_alone() {
     const fs::path log = new_log();
-    expect_recorded(record_lines("100 5\\n101 7\\n99 2\\nend\\n", log));
+    expect_recorded(record_lines("100 5 1 99 101\\n101 7 -1 100 102\\n0 0 0 99 100\\nend\\n", log));
     expect_match(replay("clean", log), 3);
 }
 
 void dead_feed_never_looks_finished() {
     const fs::path log = new_log();
-    const Result dead = record_lines("100 5\\n101 7\\n", log);
+    const Result dead = record_lines("100 5 1 99 101\\n101 7 -1 100 102\\n", log);
     expect(dead.exit_code == 2, "feed died without its end line, exit " + std::to_string(dead.exit_code));
     const Replay r = replay("clean", log);
     expect(r.exit_code == 0 && r.status == "torn" && r.events == 2, "after a dead feed, got " + show(r));
@@ -341,14 +357,14 @@ void dead_feed_never_looks_finished() {
 
 void finished_run_is_synced_to_disk() {
     const fs::path log = new_log();
-    const Result r = record_lines("100 5\\n101 7\\nend\\n", log);
+    const Result r = record_lines("100 5 1 99 101\\n101 7 -1 100 102\\nend\\n", log);
     expect_recorded(r);
     expect(r.out.find("disk_syncs=0") == std::string::npos, "run finished without a disk sync: " + r.out);
 }
 
 void bad_feed_line_stops_the_run_and_keeps_the_prefix() {
     const fs::path log = new_log();
-    const Result bad = record_lines("100 5\\n101 7\\nnot a tick\\n99 2\\n", log);
+    const Result bad = record_lines("100 5 1 99 101\\n101 7 -1 100 102\\nnot a tick\\n99 2 1 98 100\\n", log);
     expect(bad.exit_code == 2, "bad feed line, exit " + std::to_string(bad.exit_code));
     const Replay r = replay("clean", log);
     expect(r.exit_code == 0 && r.status == "torn" && r.first == -1 && r.events == 2,
@@ -394,6 +410,7 @@ int main(int argc, char** argv) {
         {"clean_replay_matches", clean_replay_matches},
         {"replay_is_repeatable", replay_is_repeatable},
         {"large_run_wraps_the_ring", large_run_wraps_the_ring},
+        {"real_ravi_replays_to_the_same_cent", real_ravi_replays_to_the_same_cent},
         {"empty_run_matches", empty_run_matches},
         {"wall_clock_leak_is_pinned", wall_clock_leak_is_pinned},
         {"random_leak_is_pinned", random_leak_is_pinned},

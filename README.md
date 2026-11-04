@@ -12,7 +12,7 @@ If a program makes a strange trade at 10:32 on Tuesday, you can't normally see t
 | --- | --- | --- | --- |
 | **Fast:** added cost per event at p99 | Under 1 µs | 83 ns | Synthetic, 20M events a round |
 | **Fast:** added cost per event at p99.9 | Under 1 µs | 167 ns | Synthetic, 20M events a round |
-| **Exact:** replay matches bit for bit | Every event | 14,750 of 14,750, twice | Real BTC/USDT trades |
+| **Exact:** replay matches bit for bit | Every event | 93,415 of 93,415, twice | Real BTC/USDT trades and best prices, running Real Ravi |
 
 All speed numbers come from an Apple M3 Pro laptop. The timer ticks about every 42 ns, so small results are coarse.
 
@@ -51,14 +51,14 @@ flowchart LR
 | --- | --- | --- |
 | Magic | 8 bytes | Proves this file is one of our logs |
 | Length | 4 bytes | Lets replay find where a record ends, or see that it was cut off |
-| Tick | 24 bytes | Sequence, price and quantity, because replay has no feed |
+| Tick | 48 bytes | Sequence, price, quantity, who started the trade, and best bid and ask, because replay has no feed |
 | Input count | 4 bytes | Catches a strategy that read too few inputs |
 | Inputs | 8 bytes each | The exact clock and random values handed out |
 | Event hash | 8 bytes | The fingerprint replay compares against |
 | CRC | 4 bytes | Catches damaged bytes |
 | Footer | 16 bytes | End marker, event count and CRC: the only proof that the run finished, and that no records were removed |
 
-A normal record is 60 bytes.
+A record is 68 bytes plus 8 for each input. The toy strategy reads two inputs, so 84 bytes. Real Ravi reads one, so 76.
 
 ### What replay can report
 
@@ -101,11 +101,13 @@ build/fr_tool replay clean run.log 0
 | --- | --- |
 | `include/fr/flight_recorder.h` | The contract: `Tick`, `Gate`, `Strategy`, `record_run`, `replay_run` |
 | `src/flight_recorder.cpp` | The engine: ring, background writer, checksums, disk syncs, replay |
-| `tools/live_feed.py` | Streams public Binance trades, using only Python's standard library |
+| `tools/live_feed.py` | Streams public Binance trades and best prices, using only Python's standard library |
 | `tests/feed.h` | Synthetic feed, and a reader for streamed trades |
+| `strategies/real_ravi.h` | Real Ravi, a paper market maker: no order ever leaves this file |
 | `tests/strategies.h` | The toy strategy, planted leaks and a crash |
 | `tests/fr_tool.cpp` | Runs one record or replay as its own process |
-| `tests/run_tests.cpp` | The 28 black-box tests |
+| `tests/run_tests.cpp` | The 29 black-box tests |
+| `tests/ravi_tests.cpp` | Unit tests for Real Ravi's rules |
 | `tests/bench_record.cpp` | The speed test |
 
 ## Decisions
@@ -191,7 +193,7 @@ Each experiment started with a question. Where a prediction was made first, it's
 
 - **Why:** to check that the record layout was understood before trusting it.
 - **Predicted:** 5,600,000 bytes for 100,000 events, at 56 bytes each.
-- **Result:** 5,600,004 bytes. The 4 extra bytes are the end marker. Records have since grown to 60 bytes.
+- **Result:** 5,600,004 bytes. The 4 extra bytes are the end marker. Records have since grown: see the layout above.
 
 ### 2. First speed test
 
@@ -280,9 +282,29 @@ The slowest sync took up to 8.6 ms, and the trading thread didn't wait for it. R
 
 **Still open:** a cut-off last line in a feed is believed, so a truncated trade could be recorded before the run stops.
 
+### Real Ravi's first live paper run
+
+- **Why:** to put real strategy logic through record and replay, and to see whether a market maker earns the spread on live data.
+- **Predicted:** a profit before fees.
+- **Result:** a loss. All fills are simulated, in one 10-minute BTC/USDT session.
+
+| Measure | Result |
+| --- | --- |
+| Events | 93,415, 0 missed, busiest second 1,128 |
+| Replay | Matched every event twice, with identical profit |
+| Fills | 57 (29 buys, 28 sells) |
+| Profit before fees | −$0.53 |
+| Fees at 0.1% | $4.47 |
+| Profit after fees | −$4.99 |
+| Spread earned per fill, per BTC | +$1.35 |
+| Mid move 1 second after a fill, per BTC | −$5.15, against him on 55 of 57 fills |
+| Median spread: book, then Ravi | $0.01, then $2.55 |
+
+This is adverse selection in the data: his wide quotes were mostly reached by moves that kept going. It's one session and the fills cluster, so it isn't a general result.
+
 ## Tests
 
-`make check` runs the 28 tests below on two ring sizes, 16 MB and 4 KB. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
+`make check` runs the 29 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
 
 ### Replay
 
@@ -382,9 +404,10 @@ A sixth planted bug, removing the regular-file check, passed every test. That is
 ## What isn't proven yet
 
 - **A real power cut.** Damage is simulated, and the directory sync can't be tested this way. The 100 ms loss is a design target, not a measurement.
-- **A real strategy.** The strategy is a toy, so bit-for-bit replay hasn't faced real strategy code.
+- **A profitable strategy.** Real Ravi lost money on his one live run, which is too little data to judge him either way.
+- **Clock leaks in Real Ravi by replay alone.** Unit tests catch one, but the replay test's run is too short to.
 - **Leaks in network code.** The feed runs in Python before the gate, so it hasn't been tested for leaks.
-- **A busier live feed.** Trades are far quieter than an order book feed. The one live recording was a single 10-minute window on one market.
+- **A full order book feed.** The feed carries trades and best prices, not the whole book. The live recordings are single 10-minute windows on one market.
 - **A tuned machine.** All speed numbers come from a Mac laptop, not a tuned Linux machine.
 - **Software CRC speed.** Only the hardware checksum has been timed.
 
