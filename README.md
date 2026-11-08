@@ -106,8 +106,9 @@ build/fr_tool replay clean run.log 0
 | `strategies/real_ravi.h` | Real Ravi, a paper market maker: no order ever leaves this file |
 | `tests/strategies.h` | The toy strategy, planted leaks and a crash |
 | `tests/fr_tool.cpp` | Runs one record or replay as its own process |
-| `tests/run_tests.cpp` | The 29 black-box tests |
+| `tests/run_tests.cpp` | The 30 black-box tests |
 | `tests/ravi_tests.cpp` | Unit tests for Real Ravi's rules |
+| `tools/postmortem.cpp` | Replays saved Ravi days: labels, the signal test and shadow traders |
 | `tests/bench_record.cpp` | The speed test |
 
 ## Decisions
@@ -302,9 +303,24 @@ The slowest sync took up to 8.6 ms, and the trading thread didn't wait for it. R
 
 This is adverse selection in the data: his wide quotes were mostly reached by moves that kept going. It's one session and the fills cluster, so it isn't a general result.
 
+### Ravi's postmortem, 4 live days
+
+`build/postmortem <logs...>` replays saved days and explains the result. Days: 1 on 2026-11-04, 3 back to back on 2026-11-08. No predictions were taken. Fills are simulated.
+
+| Finding | Result |
+| --- | --- |
+| Events, all replays matched | 172,419 |
+| Profit before fees, all 4 days | −$1.75, a loss on every day |
+| Fills against Ravi 1 second later | 152 of 154 |
+| Labels (rush, against flow, near limit, clustered) | No label separates good fills from bad |
+| Imbalance vs next-second move | Correlation 0.59 (0.52 on the new days), possibly part feed lateness |
+| New days only, before fees | Ravi −$1.23, no lean −$1.32, plain $2.55 stall −$1.12 |
+
+The inventory slide keeps Ravi's stock lower (2.98 lots against 3.87), but he hasn't beaten a plain fixed spread on unseen days.
+
 ## Tests
 
-`make check` runs the 29 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
+`make check` runs the 30 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
 
 ### Replay
 
@@ -405,7 +421,6 @@ A sixth planted bug, removing the regular-file check, passed every test. That is
 
 - **A real power cut.** Damage is simulated, and the directory sync can't be tested this way. The 100 ms loss is a design target, not a measurement.
 - **A profitable strategy.** Real Ravi lost money on his one live run, which is too little data to judge him either way.
-- **Clock leaks in Real Ravi by replay alone.** Unit tests catch one, but the replay test's run is too short to.
 - **Leaks in network code.** The feed runs in Python before the gate, so it hasn't been tested for leaks.
 - **A full order book feed.** The feed carries trades and best prices, not the whole book. The live recordings are single 10-minute windows on one market.
 - **A tuned machine.** All speed numbers come from a Mac laptop, not a tuned Linux machine.

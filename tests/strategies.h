@@ -125,9 +125,44 @@ private:
     uint64_t at_;
 };
 
+// Real Ravi timed by his own stopwatch instead of the gate. The first time
+// still comes from the gate, so only a run where seconds pass can show the
+// leak: replay runs far faster than the live feed did.
+class RaviStopwatchLeak final : public fr::Strategy {
+public:
+    int64_t on_tick(const fr::Tick& tick, fr::Gate& gate) override {
+        Stopwatch leaky(gate, *this);
+        return ravi_.on_tick(tick, leaky);
+    }
+    uint64_t state_hash() const override { return ravi_.state_hash(); }
+
+private:
+    struct Stopwatch final : fr::Gate {
+        Stopwatch(fr::Gate& gate, RaviStopwatchLeak& owner) : gate_(gate), owner_(owner) {}
+        uint64_t now_ns() override {
+            const uint64_t recorded = gate_.now_ns();  // still read, so the input count matches
+            const auto now = std::chrono::steady_clock::now();
+            if (owner_.first_ns_ == 0) {
+                owner_.first_ns_ = recorded;
+                owner_.started_ = now;
+            }
+            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(now - owner_.started_);
+            return owner_.first_ns_ + static_cast<uint64_t>(elapsed.count());
+        }
+        uint64_t random_u64() override { return gate_.random_u64(); }
+        fr::Gate& gate_;
+        RaviStopwatchLeak& owner_;
+    };
+
+    fr_ravi::RealRavi ravi_;
+    uint64_t first_ns_ = 0;
+    std::chrono::steady_clock::time_point started_;
+};
+
 inline std::unique_ptr<fr::Strategy> make_strategy(const std::string& name, uint64_t at, bool replaying) {
     if (name == "clean") return std::make_unique<Clean>();
     if (name == "ravi") return std::make_unique<fr_ravi::RealRavi>();
+    if (name == "ravi_stopwatch") return std::make_unique<RaviStopwatchLeak>();
     if (name == "wall_clock") return std::make_unique<WallClockLeak>(at);
     if (name == "random") return std::make_unique<RandomLeak>(at);
     if (name == "iteration") return std::make_unique<IterationLeak>(at);

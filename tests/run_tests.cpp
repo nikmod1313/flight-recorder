@@ -329,8 +329,9 @@ void existing_recording_is_never_overwritten() {
     expect_match(replay("clean", log), 100);
 }
 
-Result record_lines(const std::string& lines, const fs::path& log) {
-    const std::string command = "printf '" + lines + "' | " + g_tool + " record-stdin clean " + log.string() + " 2>/dev/null";
+// feed is a shell command whose output is the streamed feed.
+Result record_feed(const std::string& feed, const std::string& strategy, const fs::path& log) {
+    const std::string command = "{ " + feed + "; } | " + g_tool + " record-stdin " + strategy + " " + log.string() + " 2>/dev/null";
     Result result;
     FILE* pipe = popen(command.c_str(), "r");
     if (!pipe) return result;
@@ -339,6 +340,35 @@ Result record_lines(const std::string& lines, const fs::path& log) {
     const int status = pclose(pipe);
     result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
     return result;
+}
+
+Result record_lines(const std::string& lines, const fs::path& log) {
+    return record_feed("printf '" + lines + "'", "clean", log);
+}
+
+// A sub-second run can't tell the gate's clock from a stopwatch, so this feed
+// pauses for over a second twice. Replay doesn't pause, so a strategy that
+// times itself must diverge, while real Ravi must still match.
+void stopwatch_leak_is_caught_once_seconds_pass() {
+    std::string chunk[3];
+    for (int c = 0; c < 3; ++c) {
+        for (int i = 0; i < 50; ++i) {
+            const long long bid = 7'800'000'000'000LL + (c * 50 + i) % 7 * 1'000'000;  // the mid wanders by cents
+            chunk[c] += "0 0 0 " + std::to_string(bid) + " " + std::to_string(bid + 1'000'000) + "\\n";
+        }
+    }
+    const std::string feed = "printf '" + chunk[0] + "'; sleep 1.2; printf '" + chunk[1] + "'; sleep 1.2; printf '" +
+                             chunk[2] + "end\\n'";
+    for (const std::string strategy : {"ravi", "ravi_stopwatch"}) {
+        const fs::path log = new_log();
+        expect_recorded(record_feed(feed, strategy, log));
+        const Replay r = replay(strategy, log);
+        if (strategy == "ravi") {
+            expect(r.status == "match" && r.events == 150, "real Ravi over a paced feed, got " + show(r));
+        } else {
+            expect(r.status == "diverged", "stopwatch leak not caught after a pause, got " + show(r));
+        }
+    }
 }
 
 void streamed_feed_replays_from_the_log_alone() {
@@ -411,6 +441,7 @@ int main(int argc, char** argv) {
         {"replay_is_repeatable", replay_is_repeatable},
         {"large_run_wraps_the_ring", large_run_wraps_the_ring},
         {"real_ravi_replays_to_the_same_cent", real_ravi_replays_to_the_same_cent},
+        {"stopwatch_leak_is_caught_once_seconds_pass", stopwatch_leak_is_caught_once_seconds_pass},
         {"empty_run_matches", empty_run_matches},
         {"wall_clock_leak_is_pinned", wall_clock_leak_is_pinned},
         {"random_leak_is_pinned", random_leak_is_pinned},
