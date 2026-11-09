@@ -8,6 +8,7 @@
 //
 // Labels and thresholds were chosen before looking at these results, so a
 // label can't be picked just because it happened to fit.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <deque>
@@ -84,6 +85,7 @@ struct Day final : fr::Strategy {
     std::vector<Point> mids;
     std::vector<Point> trade_imbalance;  // imbalance_bp before each trade, stored in mid2
     std::deque<uint64_t> recent_trades;
+    std::vector<int64_t> busyness;  // trades in the previous second, seen at each trade
     uint64_t last_fill_t = 0;
 
     explicit Day(const std::vector<Trader>& s) : shadows(s) {}
@@ -129,6 +131,7 @@ struct Day final : fr::Strategy {
 
         if (tick.side != 0) {
             trade_imbalance.push_back({t, imbalance});
+            busyness.push_back(static_cast<int64_t>(recent_trades.size()));
             recent_trades.push_back(t);
         }
         mids.push_back({t, mid2});
@@ -209,7 +212,19 @@ int main(int argc, char** argv) {
     plain.base_spread_cents = 255;  // Ravi's median width on the first live day
     Settings no_lean;
     no_lean.lean_cents = 0;
-    const std::vector<Trader> shadow_set = {Trader("plain_255", plain), Trader("no_lean", no_lean)};
+    // The three fixes, each set from days 1-4 only, before days 5-7 were recorded.
+    Settings step_aside;
+    step_aside.step_aside_bp = 3'000;  // the same 0.30 the labels use
+    Settings lean_300;
+    lean_300.lean_cents = 300;  // about the $3.50 move the signal predicts
+    Settings rush_pull;
+    rush_pull.rush_trades = 217;  // the busiest 10% of moments on days 1-4
+    Settings all_three = step_aside;
+    all_three.lean_cents = lean_300.lean_cents;
+    all_three.rush_trades = rush_pull.rush_trades;
+    const std::vector<Trader> shadow_set = {Trader("plain_255", plain), Trader("no_lean", no_lean),
+                                            Trader("step_aside", step_aside), Trader("lean_300", lean_300),
+                                            Trader("rush_pull", rush_pull), Trader("all_three", all_three)};
 
     Totals ravi_totals;
     std::vector<Totals> shadow_totals(shadow_set.size());
@@ -217,11 +232,16 @@ int main(int argc, char** argv) {
     Tally flow_up, flow_down, flow_middle;  // next-second mid move after a trade, by imbalance
     double sum_xy = 0, sum_x = 0, sum_y = 0, sum_xx = 0, sum_yy = 0;
     long pairs = 0;
+    std::vector<int64_t> busyness;
 
     for (int i = 1; i < argc; ++i) {
         Day day(shadow_set);
         const fr::ReplayReport report = fr::replay_run(day, argv[i]);
-        if (report.status != fr::ReplayStatus::Match) {
+        // A torn tail means the feed died: every event before the tear still replayed exactly.
+        if (report.status == fr::ReplayStatus::TornTail) {
+            std::printf("%s: torn, so only the %llu events before the tear are used\n", argv[i],
+                        static_cast<unsigned long long>(report.events_replayed));
+        } else if (report.status != fr::ReplayStatus::Match) {
             std::fprintf(stderr, "%s: replay did not match, so it can't be analysed\n", argv[i]);
             return 1;
         }
@@ -230,6 +250,7 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(report.events_replayed), r.fills.size(), r.ravi.gross_pnl() / 1e5,
                     r.ravi.fees() / 1e5, r.ravi.net_pnl() / 1e5);
         score(day, r, ravi_totals, with_label, without_label);
+        busyness.insert(busyness.end(), day.busyness.begin(), day.busyness.end());
         for (size_t s = 0; s < day.shadows.size(); ++s) score(day, day.shadows[s], shadow_totals[s], nullptr, nullptr);
 
         // The signal test: does imbalance before a trade predict the next second's move?
@@ -264,5 +285,10 @@ int main(int argc, char** argv) {
     const double corr = (n * sum_xy - sum_x * sum_y) /
                         std::sqrt((n * sum_xx - sum_x * sum_x) * (n * sum_yy - sum_y * sum_y));
     std::printf("correlation of imbalance with the next-second move: %.3f over %ld trades (windows overlap)\n", corr, pairs);
+
+    std::sort(busyness.begin(), busyness.end());
+    auto pct = [&](size_t p) { return busyness.empty() ? 0 : busyness[busyness.size() * p / 100]; };
+    std::printf("\n== Trades in the second before each trade: median %lld, 90th percentile %lld, 99th %lld ==\n",
+                static_cast<long long>(pct(50)), static_cast<long long>(pct(90)), static_cast<long long>(pct(99)));
     return 0;
 }

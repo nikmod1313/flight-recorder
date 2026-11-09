@@ -149,6 +149,41 @@ void imbalance_stays_in_range() {
     check(ravi.imbalance_bp() < -9'000 && ravi.imbalance_bp() >= -10'000, "all selling gives an imbalance near -1");
 }
 
+void step_aside_pulls_the_pushed_side() {
+    Settings s;
+    s.step_aside_bp = 3'000;
+    RealRavi ravi(s);
+    TestGate gate;
+    ravi.on_tick(book(1'000'000, 1'000'002), gate);
+    for (int i = 0; i < 100; ++i) ravi.on_tick(trade(+1, 1'000'001, 1'000'000, 1'000'002), gate);
+    check(!ravi.quotes().ask_on && ravi.quotes().bid_on, "buyers pushing: Ravi stops selling, keeps buying");
+    for (int i = 0; i < 200; ++i) ravi.on_tick(trade(-1, 1'000'001, 1'000'000, 1'000'002), gate);
+    check(ravi.quotes().ask_on && !ravi.quotes().bid_on, "sellers pushing: Ravi stops buying, keeps selling");
+}
+
+void rush_pulls_both_sides_until_it_passes() {
+    Settings s;
+    s.rush_trades = 50;
+    RealRavi ravi(s);
+    TestGate gate;
+    ravi.on_tick(book(1'000'000, 1'000'002), gate);
+    for (int i = 0; i < 49; ++i) ravi.on_tick(trade(i % 2 ? 1 : -1, 1'000'001, 1'000'000, 1'000'002), gate);
+    check(ravi.quotes().bid_on && ravi.quotes().ask_on, "49 trades in a second: still quoting");
+    ravi.on_tick(trade(1, 1'000'001, 1'000'000, 1'000'002), gate);
+    check(!ravi.quotes().bid_on && !ravi.quotes().ask_on, "50 trades in a second: both sides pulled");
+    gate.now += 2 * fr_ravi::kNanosPerSecond;
+    ravi.on_tick(book(1'000'000, 1'000'002), gate);
+    check(ravi.quotes().bid_on && ravi.quotes().ask_on, "two quiet seconds later: quoting again");
+}
+
+void new_rules_are_off_by_default() {
+    RealRavi ravi;
+    TestGate gate;
+    ravi.on_tick(book(1'000'000, 1'000'002), gate);
+    for (int i = 0; i < 500; ++i) ravi.on_tick(trade(+1, 1'000'001, 1'000'000, 1'000'002), gate);
+    check(ravi.quotes().ask_on && ravi.quotes().bid_on, "default Ravi keeps both sides in a push and a rush");
+}
+
 }  // namespace
 
 int main() {
@@ -164,6 +199,9 @@ int main() {
     stale_book_pulls_quotes();
     wild_market_pulls_quotes();
     imbalance_stays_in_range();
+    step_aside_pulls_the_pushed_side();
+    rush_pulls_both_sides_until_it_passes();
+    new_rules_are_off_by_default();
     std::printf("%d failed\n", g_failed);
     return g_failed == 0 ? 0 : 1;
 }

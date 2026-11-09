@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 
 #include "fr/flight_recorder.h"
 
@@ -27,6 +28,8 @@ struct Settings {
     int64_t max_variance = 1'000'000;      // volatility brake: sigma of $10 per root second
     uint64_t stale_ns = 5 * kNanosPerSecond;  // stale data stop
     int64_t fee_divisor = 1'000;           // 0.1% of notional per fill
+    int64_t step_aside_bp = 0;             // pull the side a strong push would run over; 0 is off
+    int64_t rush_trades = 0;               // pull both sides after this many trades in a second; 0 is off
 };
 
 struct Quotes {
@@ -71,13 +74,22 @@ public:
         } else {
             fill_against(tick);
             update_flow(tick);
+            if (s_.rush_trades > 0) recent_trades_.push_back(now);
         }
+        while (!recent_trades_.empty() && recent_trades_.front() + kNanosPerSecond < now) recent_trades_.pop_front();
         update_variance(mid2, now);
         mark_ = mid2 / 2;
 
         if (net_pnl() < -s_.max_loss_millicents) stopped_ = true;  // stays stopped for the day
 
         quotes_ = make_quotes(best_bid, best_ask, lots_, variance_, imbalance_bp(), s_);
+        if (s_.step_aside_bp > 0) {  // buyers pushing: don't sell to them, and the same for sellers
+            if (imbalance_bp() > s_.step_aside_bp) quotes_.ask_on = false;
+            if (imbalance_bp() < -s_.step_aside_bp) quotes_.bid_on = false;
+        }
+        if (s_.rush_trades > 0 && static_cast<int64_t>(recent_trades_.size()) >= s_.rush_trades) {
+            quotes_.bid_on = quotes_.ask_on = false;  // hide until the rush passes
+        }
         if (stopped_ || variance_ > s_.max_variance || now - last_book_ns_ > s_.stale_ns) {
             quotes_.bid_on = quotes_.ask_on = false;
         }
@@ -162,6 +174,7 @@ private:
     int64_t last_mid2_ = 0;
     uint64_t last_second_ = 0;
     uint64_t last_book_ns_ = 0;
+    std::deque<uint64_t> recent_trades_;  // trade times in the last second, only when rush_trades is on
     bool stopped_ = false;
 };
 

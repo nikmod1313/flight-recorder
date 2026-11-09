@@ -318,6 +318,19 @@ This is adverse selection in the data: his wide quotes were mostly reached by mo
 
 The inventory slide keeps Ravi's stock lower (2.98 lots against 3.87), but he hasn't beaten a plain fixed spread on unseen days.
 
+### Three fixes, judged on 3 new days
+
+Settings were fixed from days 1-4 before days 5-7 (2026-11-09) were recorded. Day 6's feed died, so its verified part before the tear was used. Fills are simulated.
+
+| Version | Fills | Before fees | Move 1 s later, per BTC |
+| --- | --- | --- | --- |
+| Ravi | 263 | −$2.50 | −$8.18 |
+| Lean $3 instead of $1 | 141 | −$0.62 | −$6.87 |
+| Pull out at 217+ trades a second | 234 | −$2.65 | −$8.38 |
+| Step aside past 0.30 imbalance | 4 | −$0.02 | too few fills |
+
+Only the bigger lean helped, and every version still loses after fees.
+
 ## Tests
 
 `make check` runs the 30 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
