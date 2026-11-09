@@ -142,6 +142,92 @@ void real_ravi_replays_to_the_same_cent() {
            "day differs: " + recorded.out + " vs " + replayed.out);
 }
 
+// The number after "name=" in a tool's output, or -2 if it isn't there.
+long long field(const std::string& out, const std::string& name) {
+    const auto at = out.find(name + "=");
+    return at == std::string::npos ? -2 : std::atoll(out.c_str() + at + name.size() + 1);
+}
+
+std::string fork_status(const std::string& out) {
+    const auto at = out.find("fork status=");
+    return at == std::string::npos ? "" : out.substr(at + 12, out.find(' ', at + 12) - at - 12);
+}
+
+std::string line_starting(const std::string& out, const std::string& start) {
+    const auto at = out.find(start);
+    return at == std::string::npos ? "" : out.substr(at + start.size(), out.find('\n', at) - at - start.size());
+}
+
+void fork_without_a_change_never_differs() {
+    const fs::path log = new_log();
+    expect_recorded(record("ravi", log, 200000));
+    const Result r = tool("fork ravi " + log.string() + " 100000 0");
+    expect(fork_status(r.out) == "done" && field(r.out, "different") == 0 && field(r.out, "first_difference") == -1,
+           "an unchanged fork differed: " + r.out);
+    expect(!line_starting(r.out, "original ").empty() &&
+               line_starting(r.out, "original ") == line_starting(r.out, "forked "),
+           "an unchanged fork ended differently: " + r.out);
+}
+
+void fork_changes_nothing_before_its_point() {
+    const fs::path log = new_log();
+    expect_recorded(record("ravi", log, 200000));
+    const Result r = tool("fork ravi " + log.string() + " 100000 0 lean_cents=0");
+    expect(fork_status(r.out) == "done" && field(r.out, "first_difference") == 100000 && field(r.out, "different") > 0,
+           "fork with no lean: " + r.out);
+    const Result again = tool("fork ravi " + log.string() + " 100000 0 lean_cents=0");
+    expect(again.out == r.out, "the same fork gave two answers: " + r.out + " vs " + again.out);
+}
+
+void fork_past_the_end_never_forks() {
+    const fs::path log = new_log();
+    expect_recorded(record("ravi", log, 1000));
+    const Result r = tool("fork ravi " + log.string() + " 5000 0 lean_cents=0");
+    expect(fork_status(r.out) == "never_forked" && field(r.out, "events") == 1000, "fork past the end: " + r.out);
+}
+
+void fork_on_a_cut_log_uses_the_verified_part() {
+    const fs::path log = new_log();
+    expect_recorded(record("ravi", log, 10000));
+    fs::resize_file(log, fs::file_size(log) - 40);  // loses the footer and part of the last record
+    const Result r = tool("fork ravi " + log.string() + " 5000 0 lean_cents=0");
+    expect(fork_status(r.out) == "torn" && field(r.out, "events") == 9999, "fork on a cut log: " + r.out);
+}
+
+void fork_refuses_a_leaky_original() {
+    const fs::path log = new_log();
+    expect_recorded(record("wall_clock", log, 10000, 5000));
+    for (const char* fork_at : {"9000", "2000"}) {  // the leak before the fork, then after it
+        const Result r = tool("fork wall_clock " + log.string() + " " + fork_at + " 5000");
+        expect(fork_status(r.out) == "diverged" && field(r.out, "first") == 5000,
+               std::string("leaky original, fork at ") + fork_at + ": " + r.out);
+    }
+}
+
+// The fork reads an extra value at 3000, before its change at 5000, so it isn't the
+// same strategy as the recording and must be refused.
+void fork_must_match_before_its_point() {
+    const fs::path log = new_log();
+    expect_recorded(record("extra_read", log, 10000, 3000));
+    const Result r = tool("fork extra_read " + log.string() + " 5000 3000");
+    expect(fork_status(r.out) == "diverged" && field(r.out, "first") == 3000, "fork differed before its point: " + r.out);
+}
+
+void fork_that_needs_more_inputs_fails_loudly() {
+    const fs::path log = new_log();
+    expect_recorded(record("extra_read", log, 10000, 7000));
+    const Result r = tool("fork extra_read " + log.string() + " 5000 7000");
+    expect(fork_status(r.out) == "needs_more_inputs" && field(r.out, "needs_input_at") == 7000,
+           "fork asking for more inputs: " + r.out);
+}
+
+void fork_with_an_unknown_setting_fails() {
+    const fs::path log = new_log();
+    expect_recorded(record("ravi", log, 1000));
+    const Result r = tool("fork ravi " + log.string() + " 500 0 lean=300");
+    expect(r.exit_code == 2 && r.out.find("fork status") == std::string::npos, "typo in a setting: " + r.out);
+}
+
 void empty_run_matches() {
     const fs::path log = new_log();
     expect_recorded(record("clean", log, 0));
@@ -442,6 +528,14 @@ int main(int argc, char** argv) {
         {"large_run_wraps_the_ring", large_run_wraps_the_ring},
         {"real_ravi_replays_to_the_same_cent", real_ravi_replays_to_the_same_cent},
         {"stopwatch_leak_is_caught_once_seconds_pass", stopwatch_leak_is_caught_once_seconds_pass},
+        {"fork_without_a_change_never_differs", fork_without_a_change_never_differs},
+        {"fork_changes_nothing_before_its_point", fork_changes_nothing_before_its_point},
+        {"fork_past_the_end_never_forks", fork_past_the_end_never_forks},
+        {"fork_on_a_cut_log_uses_the_verified_part", fork_on_a_cut_log_uses_the_verified_part},
+        {"fork_refuses_a_leaky_original", fork_refuses_a_leaky_original},
+        {"fork_must_match_before_its_point", fork_must_match_before_its_point},
+        {"fork_that_needs_more_inputs_fails_loudly", fork_that_needs_more_inputs_fails_loudly},
+        {"fork_with_an_unknown_setting_fails", fork_with_an_unknown_setting_fails},
         {"empty_run_matches", empty_run_matches},
         {"wall_clock_leak_is_pinned", wall_clock_leak_is_pinned},
         {"random_leak_is_pinned", random_leak_is_pinned},

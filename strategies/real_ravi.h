@@ -30,6 +30,10 @@ struct Settings {
     int64_t fee_divisor = 1'000;           // 0.1% of notional per fill
     int64_t step_aside_bp = 0;             // pull the side a strong push would run over; 0 is off
     int64_t rush_trades = 0;               // pull both sides after this many trades in a second; 0 is off
+    int64_t chase_cents = 0;               // after a fill, shift both quotes this far the way the price went; 0 is off
+    uint64_t chase_ns = 3 * kNanosPerSecond;  // and for this long
+    int64_t ladder_cents = 0;              // after a fill, the side hit stays at least this far past the fill price; 0 is off
+    uint64_t ladder_ns = 3 * kNanosPerSecond;  // and for this long after each fill
 };
 
 struct Quotes {
@@ -65,6 +69,7 @@ public:
 
     int64_t on_tick(const fr::Tick& tick, fr::Gate& gate) override {
         const uint64_t now = gate.now_ns();
+        now_ = now;
         const int64_t best_bid = tick.best_bid / kUnitsPerCent;
         const int64_t best_ask = tick.best_ask / kUnitsPerCent;
         const int64_t mid2 = best_bid + best_ask;  // twice the mid price
@@ -87,6 +92,16 @@ public:
             if (imbalance_bp() > s_.step_aside_bp) quotes_.ask_on = false;
             if (imbalance_bp() < -s_.step_aside_bp) quotes_.bid_on = false;
         }
+        if (s_.chase_cents > 0 && now < chase_until_) {  // bet that the move which filled us carries on
+            quotes_.bid += chase_dir_ * s_.chase_cents;
+            quotes_.ask += chase_dir_ * s_.chase_cents;
+            if (quotes_.bid >= best_ask) quotes_.bid = best_ask - 1;  // still never cross
+            if (quotes_.ask <= best_bid) quotes_.ask = best_bid + 1;
+        }
+        if (s_.ladder_cents > 0) {  // after selling at P, sell no lower than P + step for a while; buying mirrors it
+            if (now < ask_floor_until_ && quotes_.ask < ask_floor_) quotes_.ask = ask_floor_;
+            if (now < bid_cap_until_ && quotes_.bid > bid_cap_) quotes_.bid = bid_cap_;
+        }
         if (s_.rush_trades > 0 && static_cast<int64_t>(recent_trades_.size()) >= s_.rush_trades) {
             quotes_.bid_on = quotes_.ask_on = false;  // hide until the rush passes
         }
@@ -103,6 +118,10 @@ public:
         }
         return (h ^ last_second_) * 0x100000001B3ull;
     }
+
+    // For forks: the same Ravi, in the same state, from here on with new settings.
+    void change_settings(const Settings& settings) { s_ = settings; }
+    const Settings& settings() const { return s_; }
 
     int64_t imbalance_bp() const { return volume_ == 0 ? 0 : flow_ * 10'000 / volume_; }
     int64_t gross_pnl() const { return cash_ + lots_ * mark_; }  // mark to market
@@ -128,6 +147,15 @@ private:
         cash_ -= bought_lots * price;
         fees_ += price / s_.fee_divisor;
         ++fills_;
+        chase_dir_ = -bought_lots;  // we sold, so buyers are pushing the price up
+        chase_until_ = now_ + s_.chase_ns;
+        if (bought_lots < 0) {  // each fill on a side moves that side's step from its own price
+            ask_floor_ = price + s_.ladder_cents;
+            ask_floor_until_ = now_ + s_.ladder_ns;
+        } else {
+            bid_cap_ = price - s_.ladder_cents;
+            bid_cap_until_ = now_ + s_.ladder_ns;
+        }
         const int64_t held = lots_ < 0 ? -lots_ : lots_;
         if (held > max_lots_) max_lots_ = held;
     }
@@ -174,6 +202,13 @@ private:
     int64_t last_mid2_ = 0;
     uint64_t last_second_ = 0;
     uint64_t last_book_ns_ = 0;
+    uint64_t now_ = 0;
+    uint64_t chase_until_ = 0;
+    int64_t chase_dir_ = 0;
+    int64_t ask_floor_ = 0;
+    uint64_t ask_floor_until_ = 0;
+    int64_t bid_cap_ = 0;
+    uint64_t bid_cap_until_ = 0;
     std::deque<uint64_t> recent_trades_;  // trade times in the last second, only when rush_trades is on
     bool stopped_ = false;
 };

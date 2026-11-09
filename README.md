@@ -106,7 +106,7 @@ build/fr_tool replay clean run.log 0
 | `strategies/real_ravi.h` | Real Ravi, a paper market maker: no order ever leaves this file |
 | `tests/strategies.h` | The toy strategy, planted leaks and a crash |
 | `tests/fr_tool.cpp` | Runs one record or replay as its own process |
-| `tests/run_tests.cpp` | The 30 black-box tests |
+| `tests/run_tests.cpp` | The 38 black-box tests |
 | `tests/ravi_tests.cpp` | Unit tests for Real Ravi's rules |
 | `tools/postmortem.cpp` | Replays saved Ravi days: labels, the signal test and shadow traders |
 | `tests/bench_record.cpp` | The speed test |
@@ -331,9 +331,23 @@ Settings were fixed from days 1-4 before days 5-7 (2026-11-09) were recorded. Da
 
 Only the bigger lean helped, and every version still loses after fees.
 
+A later idea, shifting both quotes $3 the way the price went for 3 seconds after each fill, cut the loss before fees on days 5-7 to −$1.02, with 149 fills. Its move 1 s later was −$8.26, the same as Ravi's, so it traded less rather than better.
+
+A ladder rule, keeping the side just hit at least $3 past its fill price for 3 seconds, gave −$1.49 on days 5-7, with 171 fills and a move 1 s later of −$8.37. It held less stock but traded no better.
+
+### Forking
+
+`build/fr_tool fork ravi <log> <fork_at> 0 lean_cents=300` replays a recorded day with two copies of Ravi. Both must match the recording up to event `fork_at`. Then the change is applied to one copy, and both carry on through the same recorded ticks and clock. The original is still checked against the recording to the end. The report gives the first event where they decided differently, how many decisions differed, and each copy's day.
+
+- **Assumption:** the fork's different decisions don't move the market, so the ticks after the fork are what really happened.
+- **Limit:** after the change, the fork gets the recorded gate values in the order it asks. If it asks for more than were recorded, the fork stops and says so. Gate values aren't labelled as clock or random in the log yet.
+- **Check:** forking day 1 at event 0 with `lean_cents=300` gives exactly the postmortem's $3-lean shadow: 22 fills, −$0.22288 before fees.
+
+On fresh days 8-10 (2026-11-09), recorded after every setting was fixed: Ravi −$1.50 before fees (move 1 s later −$6.34 per BTC), $3 lean −$0.47 (−$5.46), $6 ladder −$0.78 (−$6.04). The $3 lean was best on unseen days for the second time running.
+
 ## Tests
 
-`make check` runs the 30 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
+`make check` runs the 38 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
 
 ### Replay
 

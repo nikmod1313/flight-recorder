@@ -184,6 +184,66 @@ void new_rules_are_off_by_default() {
     check(ravi.quotes().ask_on && ravi.quotes().bid_on, "default Ravi keeps both sides in a push and a rush");
 }
 
+void chase_shifts_quotes_after_a_fill() {
+    Settings s;
+    s.chase_cents = 300;
+    RealRavi ravi(s);
+    RealRavi plain;
+    TestGate gate;
+    ravi.on_tick(book(1'000'000, 1'000'800), gate);
+    plain.on_tick(book(1'000'000, 1'000'800), gate);
+    const int64_t ask = ravi.quotes().ask;
+    ravi.on_tick(trade(+1, ask + 1, 1'000'000, 1'000'800), gate);  // a buyer runs through our ask
+    plain.on_tick(trade(+1, ask + 1, 1'000'000, 1'000'800), gate);
+    check(ravi.lots() == -1, "chase: the buyer filled our ask");
+    check(ravi.quotes().ask == plain.quotes().ask + 300 && ravi.quotes().bid == plain.quotes().bid + 300,
+          "chase: both quotes move up $3 after selling");
+    gate.now += 4 * fr_ravi::kNanosPerSecond;
+    ravi.on_tick(book(1'000'000, 1'000'800), gate);
+    plain.on_tick(book(1'000'000, 1'000'800), gate);
+    check(ravi.quotes().ask == plain.quotes().ask, "chase: back to normal after 3 seconds");
+
+    RealRavi tight(s);  // in a 2-cent book the $3 shift would cross, so it stops at the touch
+    tight.on_tick(book(1'000'000, 1'000'002), gate);
+    tight.on_tick(trade(+1, tight.quotes().ask + 1, 1'000'000, 1'000'002), gate);
+    check(tight.quotes().bid == 1'000'001, "chase: a shifted bid never crosses the best ask");
+}
+
+void ladder_steps_the_hit_side_only() {
+    Settings s;
+    s.ladder_cents = 300;
+    RealRavi ravi(s);
+    RealRavi plain;
+    TestGate gate;
+    ravi.on_tick(book(1'000'000, 1'000'800), gate);
+    plain.on_tick(book(1'000'000, 1'000'800), gate);
+    const int64_t first = ravi.quotes().ask;
+    ravi.on_tick(trade(+1, first + 1, 1'000'000, 1'000'800), gate);  // sold at `first`
+    plain.on_tick(trade(+1, first + 1, 1'000'000, 1'000'800), gate);
+    check(ravi.quotes().ask == first + 300, "ladder: after selling, the ask sits $3 above the fill");
+    check(ravi.quotes().bid == plain.quotes().bid, "ladder: the bid side is left alone");
+    ravi.on_tick(trade(+1, first + 301, 1'000'000, 1'000'800), gate);  // sold again one step up
+    check(ravi.lots() == -2 && ravi.quotes().ask == first + 600, "ladder: a second sale steps $3 higher again");
+    gate.now += 4 * fr_ravi::kNanosPerSecond;
+    ravi.on_tick(book(1'000'000, 1'000'800), gate);
+    check(ravi.quotes().ask < first + 300, "ladder: the step ends after its set time");
+}
+
+void ladder_mirrors_for_buying() {
+    Settings s;
+    s.ladder_cents = 300;
+    RealRavi ravi(s);
+    RealRavi plain;
+    TestGate gate;
+    ravi.on_tick(book(1'000'000, 1'000'800), gate);
+    plain.on_tick(book(1'000'000, 1'000'800), gate);
+    const int64_t bought = ravi.quotes().bid;
+    ravi.on_tick(trade(-1, bought - 1, 1'000'000, 1'000'800), gate);  // a seller runs through our bid
+    plain.on_tick(trade(-1, bought - 1, 1'000'000, 1'000'800), gate);
+    check(ravi.lots() == 1 && ravi.quotes().bid == bought - 300, "ladder: after buying, the bid sits $3 below the fill");
+    check(ravi.quotes().ask == plain.quotes().ask, "ladder: after buying, the ask side is left alone");
+}
+
 }  // namespace
 
 int main() {
@@ -202,6 +262,9 @@ int main() {
     step_aside_pulls_the_pushed_side();
     rush_pulls_both_sides_until_it_passes();
     new_rules_are_off_by_default();
+    chase_shifts_quotes_after_a_fill();
+    ladder_steps_the_hit_side_only();
+    ladder_mirrors_for_buying();
     std::printf("%d failed\n", g_failed);
     return g_failed == 0 ? 0 : 1;
 }

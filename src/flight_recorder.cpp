@@ -315,6 +315,7 @@ public:
         overran_ = false;
     }
     bool read_exactly_all() const { return !overran_ && cursor_ == count_; }
+    bool overran() const { return overran_; }
 
 private:
     uint64_t take() {
@@ -432,20 +433,19 @@ RecordReport record_run(TickSource& source, Strategy& strategy, const std::strin
     return report;
 }
 
-ReplayReport replay_run(Strategy& strategy, const std::string& log_path) {
+namespace {
+
+// Checks and hands over each record in order: (tick, inputs, input count, recorded hash).
+// Stops with Diverged as soon as visit returns false. events counts the records
+// visit accepted, and the footer must agree with it.
+template <typename Visit>
+ReplayStatus walk_log(const std::string& log_path, uint64_t& events, Visit&& visit) {
     const MappedLog log(log_path);
     const char* pos = log.begin();
     const char* const end = log.end();
 
-    ReplayGate gate;
-    ReplayReport report;
-    report.status = ReplayStatus::TornTail;  // stays torn unless the end marker proves otherwise
-
-    if (static_cast<size_t>(end - pos) < sizeof kMagic) return report;
-    if (std::memcmp(pos, kMagic, sizeof kMagic) != 0) {
-        report.status = ReplayStatus::Corrupt;
-        return report;
-    }
+    if (static_cast<size_t>(end - pos) < sizeof kMagic) return ReplayStatus::TornTail;
+    if (std::memcmp(pos, kMagic, sizeof kMagic) != 0) return ReplayStatus::Corrupt;
     pos += sizeof kMagic;
 
     while (static_cast<size_t>(end - pos) >= sizeof(uint32_t)) {
@@ -453,47 +453,108 @@ ReplayReport replay_run(Strategy& strategy, const std::string& log_path) {
         pos += sizeof length;
 
         if (length == kEndMarker) {
-            if (static_cast<size_t>(end - pos) < kFooterBytes) return report;
-            const uint64_t events = read_at<uint64_t>(pos);
-            const uint32_t crc = ~crc32c(crc32c(kCrcStart, &length, sizeof length), pos, sizeof events);
-            const bool sound = crc == read_at<uint32_t>(pos + sizeof events) && events == report.events_replayed &&
-                               pos + kFooterBytes == end;
-            report.status = sound ? ReplayStatus::Match : ReplayStatus::Corrupt;
-            return report;
+            if (static_cast<size_t>(end - pos) < kFooterBytes) return ReplayStatus::TornTail;
+            const uint64_t recorded_events = read_at<uint64_t>(pos);
+            const uint32_t crc = ~crc32c(crc32c(kCrcStart, &length, sizeof length), pos, sizeof recorded_events);
+            const bool sound = crc == read_at<uint32_t>(pos + sizeof recorded_events) &&
+                               recorded_events == events && pos + kFooterBytes == end;
+            return sound ? ReplayStatus::Match : ReplayStatus::Corrupt;
         }
         if (length < kFixedRecordBytes || length > kRingBytes || (length - kFixedRecordBytes) % sizeof(uint64_t) != 0) {
-            report.status = ReplayStatus::Corrupt;  // no real record has this length
-            return report;
+            return ReplayStatus::Corrupt;  // no real record has this length
         }
-        if (length > static_cast<size_t>(end - pos)) return report;
+        if (length > static_cast<size_t>(end - pos)) return ReplayStatus::TornTail;
 
         const size_t checked_bytes = length - sizeof(uint32_t);
         const uint32_t crc = ~crc32c(crc32c(kCrcStart, &length, sizeof length), pos, checked_bytes);
         const uint32_t count = read_at<uint32_t>(pos + sizeof(Tick));
         if (crc != read_at<uint32_t>(pos + checked_bytes) ||
             kFixedRecordBytes + size_t{count} * sizeof(uint64_t) != length) {
-            report.status = ReplayStatus::Corrupt;
-            return report;
+            return ReplayStatus::Corrupt;
         }
 
         const Tick tick = read_at<Tick>(pos);
-        if (tick.seq != report.events_replayed) {  // a record is missing or out of place
-            report.status = ReplayStatus::Corrupt;
-            return report;
-        }
+        if (tick.seq != events) return ReplayStatus::Corrupt;  // a record is missing or out of place
         const char* const inputs = pos + sizeof(Tick) + sizeof count;
         const uint64_t recorded_hash = read_at<uint64_t>(pos + checked_bytes - sizeof(uint64_t));
         pos += length;
 
-        gate.next_event(inputs, count);
-        const int64_t output = strategy.on_tick(tick, gate);
-        const uint64_t hash = event_hash(output, strategy.state_hash());
-        if (hash != recorded_hash || !gate.read_exactly_all()) {
-            report.status = ReplayStatus::Diverged;
-            report.first_divergence_seq = tick.seq;
-            return report;
-        }
-        ++report.events_replayed;
+        if (!visit(tick, inputs, count, recorded_hash)) return ReplayStatus::Diverged;
+        ++events;
+    }
+    return ReplayStatus::TornTail;  // the end marker never came
+}
+
+// One strategy's turn at one recorded event. True if it matched the recording.
+bool replays_exactly(Strategy& strategy, ReplayGate& gate, const Tick& tick, const char* inputs, uint32_t count,
+                     uint64_t recorded_hash, int64_t& output) {
+    gate.next_event(inputs, count);
+    output = strategy.on_tick(tick, gate);
+    return event_hash(output, strategy.state_hash()) == recorded_hash && gate.read_exactly_all();
+}
+
+}  // namespace
+
+ReplayReport replay_run(Strategy& strategy, const std::string& log_path) {
+    ReplayGate gate;
+    ReplayReport report;
+    report.status = walk_log(log_path, report.events_replayed,
+                             [&](const Tick& tick, const char* inputs, uint32_t count, uint64_t recorded_hash) {
+                                 int64_t output = 0;
+                                 if (replays_exactly(strategy, gate, tick, inputs, count, recorded_hash, output)) return true;
+                                 report.first_divergence_seq = tick.seq;
+                                 return false;
+                             });
+    return report;
+}
+
+ForkReport fork_run(Strategy& original, Strategy& fork, uint64_t fork_at, const std::function<void(Strategy&)>& change,
+                    const std::string& log_path) {
+    ReplayGate original_gate;
+    ReplayGate fork_gate;
+    ForkReport report;
+    bool forked = false;
+    const ReplayStatus log_status = walk_log(
+        log_path, report.events, [&](const Tick& tick, const char* inputs, uint32_t count, uint64_t recorded_hash) {
+            if (tick.seq == fork_at) {
+                change(fork);
+                forked = true;
+            }
+            // The original must match the recording the whole way, or nothing after it can be trusted.
+            int64_t original_output = 0;
+            if (!replays_exactly(original, original_gate, tick, inputs, count, recorded_hash, original_output)) {
+                report.first_divergence_seq = tick.seq;
+                return false;
+            }
+            int64_t fork_output = 0;
+            if (!forked) {  // until the fork point, the fork must be the very same strategy in the same state
+                if (replays_exactly(fork, fork_gate, tick, inputs, count, recorded_hash, fork_output)) return true;
+                report.first_divergence_seq = tick.seq;
+                return false;
+            }
+            fork_gate.next_event(inputs, count);
+            fork_output = fork.on_tick(tick, fork_gate);
+            if (fork_gate.overran()) {  // the recording has no value to give it
+                report.fork_needed_more_inputs_seq = tick.seq;
+                return false;
+            }
+            if (fork_output != original_output) {
+                if (!report.first_difference_seq) report.first_difference_seq = tick.seq;
+                ++report.different_events;
+            }
+            return true;
+        });
+
+    if (report.fork_needed_more_inputs_seq) {
+        report.status = ForkStatus::NeedsMoreInputs;
+    } else if (log_status == ReplayStatus::Diverged) {
+        report.status = ForkStatus::Diverged;
+    } else if (log_status == ReplayStatus::Corrupt) {
+        report.status = ForkStatus::Corrupt;
+    } else if (!forked) {
+        report.status = ForkStatus::NeverForked;
+    } else {
+        report.status = log_status == ReplayStatus::Match ? ForkStatus::Done : ForkStatus::TornTail;
     }
     return report;
 }

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -65,11 +66,38 @@ struct ReplayReport {
 // sync interval. Either way, everything before the loss still replays.
 RecordReport record_run(TickSource& source, Strategy& strategy, const std::string& log_path);
 
+enum class ForkStatus {
+    Done,             // the whole log was used, and the fork ran from fork_at to the end
+    TornTail,         // as Done, up to where the log was cut off
+    NeverForked,      // the log ended before fork_at
+    Diverged,         // the original, or the fork before its change, didn't match the recording
+    Corrupt,          // the log failed a check
+    NeedsMoreInputs,  // after the change, the fork asked the gate for a value the recording doesn't have
+};
+
+struct ForkReport {
+    ForkStatus status = ForkStatus::Done;
+    uint64_t events = 0;                          // events checked against the recording
+    std::optional<uint64_t> first_difference_seq;  // first event where the fork decided differently
+    uint64_t different_events = 0;                // events where the two decided differently
+    std::optional<uint64_t> first_divergence_seq;  // set when status is Diverged
+    std::optional<uint64_t> fork_needed_more_inputs_seq;
+};
+
 // Runs a fresh strategy from the log alone: no feed, real clock or real random.
 // An event diverges if its output, its state hash, or the inputs it read from
 // the gate differ from the recording. Stops at the first divergence.
 // A damaged log is a report, not an exception. Throws std::runtime_error only
 // if log_path cannot be opened or is not a regular file.
 ReplayReport replay_run(Strategy& strategy, const std::string& log_path);
+
+// Replays a recorded day with two copies of a strategy. Both must match the
+// recording up to event fork_at. Then change(fork) is applied once, and the fork
+// carries on with the same recorded ticks and the same recorded gate values,
+// in the order it asks for them. The original is still checked to the end.
+// Assumes the fork's different decisions don't change the market: the ticks
+// after the fork are what really happened. Throws like replay_run.
+ForkReport fork_run(Strategy& original, Strategy& fork, uint64_t fork_at,
+                    const std::function<void(Strategy&)>& change, const std::string& log_path);
 
 }  // namespace fr

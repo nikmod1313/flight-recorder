@@ -222,9 +222,19 @@ int main(int argc, char** argv) {
     Settings all_three = step_aside;
     all_three.lean_cents = lean_300.lean_cents;
     all_three.rush_trades = rush_pull.rush_trades;
+    // Nikharv's idea, 2026-11-09: after a fill, shift both quotes $3 the way the price went, for 3 seconds.
+    Settings chase;
+    chase.chase_cents = 300;
+    // Nikharv's second idea: after a fill at P, the side hit stays at least $3 past P for 3 seconds.
+    Settings ladder;
+    ladder.ladder_cents = 300;
+    Settings ladder_600 = ladder;  // the same idea with a $6 step
+    ladder_600.ladder_cents = 600;
     const std::vector<Trader> shadow_set = {Trader("plain_255", plain), Trader("no_lean", no_lean),
                                             Trader("step_aside", step_aside), Trader("lean_300", lean_300),
-                                            Trader("rush_pull", rush_pull), Trader("all_three", all_three)};
+                                            Trader("rush_pull", rush_pull), Trader("all_three", all_three),
+                                            Trader("chase", chase), Trader("ladder", ladder),
+                                            Trader("ladder_600", ladder_600)};
 
     Totals ravi_totals;
     std::vector<Totals> shadow_totals(shadow_set.size());
