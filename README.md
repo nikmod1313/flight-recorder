@@ -345,6 +345,24 @@ A ladder rule, keeping the side just hit at least $3 past its fill price for 3 s
 
 On fresh days 8-10 (2026-11-09), recorded after every setting was fixed: Ravi −$1.50 before fees (move 1 s later −$6.34 per BTC), $3 lean −$0.47 (−$5.46), $6 ladder −$0.78 (−$6.04). The $3 lean was best on unseen days for the second time running.
 
+## Demo terminal
+
+`demo/index.html` is a plain terminal-style screen for showing the results to people who don't code. Open it in a browser, straight from disk. Keys 1-6 switch screens: overview, days, trades (the postmortem of every trade), labels, what-if (shadows and forks), and how it works.
+
+`make demo` rebuilds its data from every `build/ravi*.log`. The screen reads `demo/data.js`. Any other UI can read `demo/data.json`, which holds the same data:
+
+| Key | One entry per | Fields |
+| --- | --- | --- |
+| `days` | Recorded day | `day`, `started`, `minutes`, `events`, `replay` (`match` or `torn`), `fills`, `spread_usd`, `price_moves_usd`, `gross_usd`, `fees_usd`, `net_usd`, `feed` (`missed`, `busiest_second`) |
+| `fills` | Ravi's trade | `day`, `t_ns`, `side`, `price` and `mid` in cents, `edge`, `move_1s`, `move_5s` in cents per BTC for Ravi (positive is good), `labels`, `path`: raw mid moves at −2, −1, −0.5, 0, 0.5, 1, 2, 3 and 5 s |
+| `labels` | Label | `name`, `with_fills`, `with_move_1s`, `without_fills`, `without_move_1s` |
+| `versions` | Version of Ravi run on every day | `name`, `fills`, `gross_usd`, `fees_usd`, `net_usd`, `move_1s`, `scored_1s`, `avg_lots` |
+| `forks` | Day, forked at its middle with `lean_cents=300` | `fork_at`, `first_difference`, `different_decisions`, `original` and `forked` days |
+| `no_change_check` | One fork with no change | Must show `different_decisions` = 0 |
+| `signal` | Imbalance bucket | trades and the average mid move 1 s later, plus `correlation` |
+
+`t_ns` comes from the machine's steady clock, so it only means something relative to its day's `start_ns`. The `rush` label now means the busiest 10% of moments on days 1-4 (217+ trades in the last second).
+
 ## Tests
 
 `make check` runs the 38 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.

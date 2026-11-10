@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight Recorder Terminal</title>
+<!-- Reads data.js, built by demo/build_data.py. Any other UI can read data.json instead. -->
+<style>
+  :root {
+    --bg: #000;
+    --panel: #0b0b0b;
+    --line: #2a2a2a;
+    --amber: #f5a623;
+    --text: #e8e8e8;
+    --dim: #8c8c8c;
+    --up: #39c463;
+    --down: #ff5a4f;
+    --key: #6aa8ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 13px/1.45 Menlo, Consolas, "DejaVu Sans Mono", monospace; min-width: 980px; }
+  .bar { background: var(--amber); color: #000; padding: 3px 10px; display: flex; gap: 24px; font-weight: bold; }
+  .bar .right { margin-left: auto; }
+  .keys { border-bottom: 1px solid var(--line); padding: 4px 10px; display: flex; gap: 4px; flex-wrap: wrap; }
+  .keys button { font: inherit; background: none; border: 1px solid var(--line); color: var(--text); padding: 1px 8px; cursor: pointer; }
+  .keys button b { color: var(--key); }
+  .keys button.on { background: var(--amber); color: #000; border-color: var(--amber); }
+  .keys button.on b { color: #000; }
+  main { padding: 8px 10px 40px; }
+  h1 { font-size: 13px; margin: 6px 0; color: var(--amber); font-weight: bold; }
+  h1 .code { color: var(--key); margin-right: 10px; }
+  h2 { font-size: 13px; margin: 14px 0 4px; color: var(--amber); font-weight: normal; border-bottom: 1px solid var(--line); }
+  table { border-collapse: collapse; }
+  th { color: var(--amber); font-weight: normal; text-align: right; padding: 1px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { text-align: right; padding: 1px 10px; white-space: nowrap; }
+  th.l, td.l { text-align: left; }
+  tr.sel td { background: #1f1a0e; }
+  tbody tr:hover td { background: #141414; cursor: default; }
+  .up { color: var(--up); } .down { color: var(--down); } .dim { color: var(--dim); } .amb { color: var(--amber); }
+  .note { border-left: 2px solid var(--amber); padding: 4px 10px; margin: 12px 0; color: var(--text); max-width: 900px; }
+  .note b { color: var(--amber); font-weight: normal; }
+  .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); max-width: 980px; }
+  .grid div { padding: 6px 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .grid .k { color: var(--dim); display: block; }
+  .grid .v { font-size: 16px; }
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; }
+  .scroll { max-height: 64vh; overflow-y: auto; border: 1px solid var(--line); }
+  .ticket { border: 1px solid var(--line); padding: 8px 10px; background: var(--panel); white-space: pre; }
+  pre { margin: 0; font: inherit; }
+  .tag { color: #000; background: var(--dim); padding: 0 4px; margin-right: 4px; }
+  .tag.rush { background: #c58b2a; } .tag.against_flow { background: #d0574d; }
+  .tag.near_limit { background: #7d7dd6; } .tag.clustered { background: #4f9fa8; }
+  .filters { margin: 4px 0 8px; color: var(--dim); }
+  .filters select { font: inherit; background: #000; color: var(--text); border: 1px solid var(--line); }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; background: #111; border-top: 1px solid var(--line); padding: 3px 10px; color: var(--dim); }
+  footer b { color: var(--amber); font-weight: normal; }
+</style>
+</head>
+<body>
+<div class="bar"><span>FLIGHT RECORDER</span><span>RAVI &lt;MARKET MAKER&gt;</span><span>BTCUSDT</span><span>PAPER TRADES</span><span class="right" id="built"></span></div>
+<div class="keys" id="keys"></div>
+<main id="screen"></main>
+<footer><b>KEYS</b> 1-6 switch screens &nbsp; <b>&uarr;/&darr;</b> move through trades &nbsp; <b>[ ]</b> change day &nbsp;&nbsp; All money is simulated: Ravi never sent a real order.</footer>
+
+<script src="data.js"></script>
+<script>
+const D = window.FR_DATA;
+const SCREENS = [
+  ["OVERVIEW", "FRO", overview],
+  ["DAYS", "FRD", days],
+  ["TRADES", "FRT", trades],
+  ["LABELS", "FRL", labels],
+  ["WHAT-IF", "FRW", whatIf],
+  ["HOW IT WORKS", "FRH", how],
+];
+const VERSION_NAMES = {
+  ravi: "RAVI AS BUILT", lean_300: "LEAN $3 INSTEAD OF $1", no_lean: "NO LEAN", plain_255: "PLAIN FIXED $2.55 GAP",
+  step_aside: "STEP ASIDE IN A PUSH", rush_pull: "PULL OUT IN A RUSH", all_three: "ALL THREE TOGETHER",
+  chase: "CHASE $3 AFTER A FILL", ladder: "LADDER $3 AFTER A FILL", ladder_600: "LADDER $6 AFTER A FILL",
+};
+const LABEL_TEXT = {
+  rush: "The market was in its busiest 10% of moments (217+ trades in the last second).",
+  against_flow: "Ravi traded against a strong crowd: sold while buyers pushed, or bought while sellers pushed.",
+  near_limit: "Ravi already held 4 or more lots, close to his 5-lot limit.",
+  clustered: "Another of Ravi's trades had happened less than 1 second before.",
+};
+let screen = 0, trade = 0, dayFilter = 0, labelFilter = "";
+
+// ---- formatting
+const usd = (v, d = 2) => (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString("en-US", {minimumFractionDigits: d, maximumFractionDigits: d});
+const signed = (v, d = 2) => (v > 0 ? "+" : "") + usd(v, d);
+const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
+const money = (v, d = 2) => `<span class="${cls(v)}">${signed(v, d)}</span>`;
+const perBtc = c => c == null ? '<span class="dim">n/a</span>' : money(c / 100);     // cents per BTC -> $ per BTC
+const price = c => usd(c / 100);                                                     // cents -> $
+const n = v => Number(v).toLocaleString("en-US");
+const sum = (xs, f) => xs.reduce((a, x) => a + f(x), 0);
+const clock = (f) => {
+  const s = Math.max(0, (f.t_ns - D.days[f.day - 1].start_ns) / 1e9);
+  return "+" + String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+};
+const tags = ls => ls.map(l => `<span class="tag ${l}">${l.toUpperCase()}</span>`).join("") || '<span class="dim">-</span>';
+const note = html => `<div class="note">${html}</div>`;
+const title = (code, text) => `<h1><span class="code">${code} &lt;GO&gt;</span>${text}</h1>`;
+
+// ---- 1. overview
+function overview() {
+  const d = D.days, v = D.versions.find(x => x.name === "ravi");
+  const events = sum(d, x => x.events), exact = d.filter(x => x.replay === "match").length;
+  const spread = sum(d, x => x.spread_usd), moves = sum(d, x => x.price_moves_usd), fees = sum(d, x => x.fees_usd);
+  const scale = Math.max(Math.abs(spread), Math.abs(moves), Math.abs(fees));
+  const bar = x => "&#9608;".repeat(Math.max(1, Math.round(Math.abs(x) / scale * 40)));
+  return title("FRO", "OVERVIEW: WHAT HAPPENED") + `
+  <div class="grid">
+    <div><span class="k">DAYS RECORDED</span><span class="v">${d.length}</span></div>
+    <div><span class="k">MARKET EVENTS RECORDED</span><span class="v">${n(events)}</span></div>
+    <div><span class="k">TRADES MISSED BY THE RECORDER</span><span class="v up">${sum(d, x => x.feed.missed || 0)}</span></div>
+    <div><span class="k">DAYS REPLAYED EXACTLY</span><span class="v up">${exact} of ${d.length}</span></div>
+    <div><span class="k">RAVI'S TRADES</span><span class="v">${n(v.fills)}</span></div>
+    <div><span class="k">PROFIT BEFORE FEES</span><span class="v ${cls(v.gross_usd)}">${signed(v.gross_usd)}</span></div>
+    <div><span class="k">FEES</span><span class="v down">${signed(-v.fees_usd)}</span></div>
+    <div><span class="k">PROFIT AFTER FEES</span><span class="v ${cls(v.net_usd)}">${signed(v.net_usd)}</span></div>
+  </div>
+  <h2>WHERE THE MONEY WENT, ALL DAYS</h2>
+  <pre>  GAP EARNED ON EACH TRADE     ${money(spread).padEnd(0)}  <span class="up">${bar(spread)}</span>
+  PRICE MOVED AGAINST HIM      ${money(moves)}  <span class="down">${bar(moves)}</span>
+  FEES                         ${money(-fees)}  <span class="down">${bar(fees)}</span></pre>
+  ${note(`<b>THE STORY.</b> Flight Recorder saved every market event Ravi saw, then replayed each day and got the same result to the cent. That lets us study his trades after the fact. The finding: Ravi earns a small gap on each trade, but the price usually moves against him within a second, so he loses even before fees.`)}
+  ${note(`<b>WHY.</b> Ravi's prices sit far from everyone else's. Only a big rush reaches them, and rushes tend to keep going. Traders call this <b>adverse selection</b>: the trades you get are the ones that are bad for you.`)}
+  ${d.some(x => x.replay !== "match") ? note(`<b>ONE DAY WAS CUT OFF.</b> On day ${d.find(x => x.replay !== "match").day} the internet feed died. The recorder marked the log as cut off, and everything before the cut still replays exactly, so that part is used.`) : ""}`;
+}
+
+// ---- 2. days
+function days() {
+  const rows = D.days.map(x => `<tr>
+    <td>${x.day}</td><td class="l">${x.started}</td><td>${x.minutes.toFixed(1)}</td><td>${n(x.events)}</td>
+    <td>${x.feed.busiest_second ? n(x.feed.busiest_second) : '<span class="dim">-</span>'}</td>
+    <td class="l ${x.replay === "match" ? "up" : "amb"}">${x.replay === "match" ? "EXACT" : "CUT OFF, PART EXACT"}</td>
+    <td>${x.fills}</td><td>${money(x.spread_usd)}</td><td>${money(x.price_moves_usd)}</td><td>${money(x.gross_usd)}</td>
+    <td>${money(-x.fees_usd)}</td><td>${money(x.net_usd)}</td></tr>`).join("");
+  return title("FRD", "DAYS: EVERY RECORDED SESSION") + `
+  <table><thead><tr><th>DAY</th><th class="l">STARTED</th><th>MIN</th><th>EVENTS</th><th>BUSIEST SEC</th><th class="l">REPLAY</th>
+  <th>TRADES</th><th>GAP EARNED</th><th>PRICE MOVES</th><th>BEFORE FEES</th><th>FEES</th><th>AFTER FEES</th></tr></thead>
+  <tbody>${rows}</tbody></table>
+  ${note(`<b>HOW TO READ IT.</b> Each row is a 10-minute live session on Bitcoin. "Replay: exact" means Flight Recorder re-ran the day from its saved log and every decision came out identical. "Before fees" is gap earned plus price moves. Ravi lost before fees on every day.`)}`;
+}
+
+// ---- 3. trades (the postmortem blotter)
+function filteredTrades() {
+  return D.fills.filter(f => (!dayFilter || f.day === dayFilter) && (!labelFilter || f.labels.includes(labelFilter)));
+}
+function sparkline(path) {
+  const pts = path.map(p => p == null ? 0 : p), lo = Math.min(...pts), hi = Math.max(...pts);
+  const blocks = "&#9601;&#9602;&#9603;&#9604;&#9605;&#9606;&#9607;&#9608;".split(";").filter(Boolean).map(x => x + ";");
+  return pts.map(p => blocks[hi === lo ? 3 : Math.round((p - lo) / (hi - lo) * 7)]).join(" ");
+}
+function trades() {
+  const list = filteredTrades();
+  trade = Math.min(trade, Math.max(0, list.length - 1));
+  const rows = list.map((f, i) => `<tr data-i="${i}" class="${i === trade ? "sel" : ""}">
+    <td>${f.day}</td><td>${clock(f)}</td><td class="l ${f.side === "BUY" ? "up" : "down"}">${f.side}</td>
+    <td>${price(f.price)}</td><td>${perBtc(f.edge)}</td><td>${perBtc(f.move_1s)}</td><td>${perBtc(f.move_5s)}</td>
+    <td class="l">${tags(f.labels)}</td></tr>`).join("");
+  const f = list[trade];
+  const dayOpts = [`<option value="0">ALL</option>`].concat(D.days.map(x => `<option value="${x.day}" ${x.day === dayFilter ? "selected" : ""}>DAY ${x.day}</option>`)).join("");
+  const labelOpts = [`<option value="">ANY</option>`].concat(Object.keys(LABEL_TEXT).map(l => `<option value="${l}" ${l === labelFilter ? "selected" : ""}>${l.toUpperCase()}</option>`)).join("");
+  const bad = list.filter(x => x.move_1s != null && x.move_1s < 0).length;
+  return title("FRT", "TRADES: THE POSTMORTEM OF EVERY TRADE") + `
+  <div class="filters">DAY <select id="fday">${dayOpts}</select> &nbsp; LABEL <select id="flabel">${labelOpts}</select>
+   &nbsp; ${n(list.length)} TRADES, <span class="down">${n(bad)} WENT AGAINST RAVI WITHIN 1 SECOND</span></div>
+  <div class="split">
+    <div class="scroll"><table><thead><tr><th>DAY</th><th>TIME</th><th class="l">SIDE</th><th>PRICE</th><th>GAP EARNED</th>
+      <th>1 SEC LATER</th><th>5 SEC LATER</th><th class="l">LABELS</th></tr></thead><tbody id="rows">${rows}</tbody></table></div>
+    <div>${f ? ticket(f) : '<span class="dim">NO TRADES MATCH</span>'}</div>
+  </div>
+  ${note(`<b>HOW TO READ IT.</b> One row per trade. "Gap earned" is how far Ravi's price was from the fair price when he traded: his pay. "1 sec later" is how the fair price moved for him one second afterwards, per Bitcoin. Red means the market moved against him. Labels describe the situation, using only what Ravi knew before the trade.`)}`;
+}
+function ticket(f) {
+  const verb = f.side === "BUY" ? "BOUGHT" : "SOLD";
+  const after = f.move_1s == null ? "The day ended before one second passed." :
+    `One second later the market had moved ${usd(Math.abs(f.move_1s) / 100)} per Bitcoin ${f.move_1s < 0 ? "AGAINST" : "IN FAVOUR OF"} him.`;
+  const net = f.move_1s == null ? null : f.edge + f.move_1s;
+  return `<div class="ticket">TRADE TICKET              DAY ${f.day}  ${clock(f)}
+------------------------------------------
+SIDE          ${f.side === "BUY" ? '<span class="up">BUY</span>' : '<span class="down">SELL</span>'}
+PRICE         ${price(f.price)}
+FAIR PRICE    ${price(f.mid)}
+GAP EARNED    ${perBtc(f.edge)}  per BTC
+1 SEC LATER   ${perBtc(f.move_1s)}  per BTC
+5 SEC LATER   ${perBtc(f.move_5s)}  per BTC
+RESULT AT 1S  ${net == null ? "n/a" : perBtc(net)}  per BTC
+------------------------------------------
+FAIR PRICE AROUND THE TRADE
+ -2s -1s .5s NOW .5s 1s  2s  3s  5s
+  ${sparkline(f.path)}
+------------------------------------------
+LABELS  ${tags(f.labels)}
+</div>${note(`Ravi ${verb} at ${price(f.price)} while the fair price was ${price(f.mid)}. ${after}`)}
+${f.labels.map(l => `<div class="dim">${l.toUpperCase()}: ${LABEL_TEXT[l]}</div>`).join("")}`;
+}
+
+// ---- 4. labels
+function labels() {
+  const rows = D.labels.map(l => `<tr><td class="l">${tags([l.name])}</td><td class="l dim">${LABEL_TEXT[l.name]}</td>
+    <td>${l.with_fills}</td><td>${perBtc(l.with_move_1s)}</td><td>${l.without_fills}</td><td>${perBtc(l.without_move_1s)}</td></tr>`).join("");
+  const s = D.signal;
+  return title("FRL", "LABELS: WHICH SITUATIONS LOSE MONEY?") + `
+  <table><thead><tr><th class="l">LABEL</th><th class="l">MEANING</th><th>TRADES WITH</th><th>1 SEC LATER</th>
+  <th>TRADES WITHOUT</th><th>1 SEC LATER</th></tr></thead><tbody>${rows}</tbody></table>
+  ${note(`<b>WHY LABELS MATTER.</b> A label is a sticky note on each trade saying what was going on. Comparing trades with and without a label shows which situations are worst, so you know where to look first.`)}
+  ${note(labelFinding())}
+  <h2>THE CROWD SIGNAL: DOES PUSHING PREDICT THE NEXT SECOND?</h2>
+  <table><thead><tr><th class="l">BEFORE A TRADE</th><th>TRADES</th><th>FAIR PRICE 1 SEC LATER</th></tr></thead><tbody>
+  <tr><td class="l">BUYERS PUSHING</td><td>${n(s.buyers_pushing.trades)}</td><td>${perBtc(s.buyers_pushing.move_1s)}</td></tr>
+  <tr><td class="l">BALANCED</td><td>${n(s.balanced.trades)}</td><td>${perBtc(s.balanced.move_1s)}</td></tr>
+  <tr><td class="l">SELLERS PUSHING</td><td>${n(s.sellers_pushing.trades)}</td><td>${perBtc(s.sellers_pushing.move_1s)}</td></tr>
+  </tbody></table>
+  ${note(`<b>WHAT THIS SHOWS.</b> When buyers push, the price usually rises in the next second, and when sellers push, it usually falls (correlation ${s.correlation.toFixed(2)}, where 0 is no link and 1 is perfect). Some of this may be the feed reporting trades a moment late. Labels and this signal are fixed before looking at results, and judged on days not used to set them.`)}`;
+}
+
+function labelFinding() {
+  const usable = D.labels.filter(l => l.with_fills >= 30 && l.without_fills >= 30);
+  if (!usable.length) return "<b>NOT ENOUGH TRADES</b> yet to compare labels fairly.";
+  const worst = usable.reduce((a, b) => Math.abs(b.with_move_1s - b.without_move_1s) > Math.abs(a.with_move_1s - a.without_move_1s) ? b : a);
+  const allLose = D.labels.every(l => l.with_move_1s < 0 && (l.without_fills === 0 || l.without_move_1s < 0));
+  return `<b>WHAT WE FOUND.</b> The biggest difference: trades labelled ${worst.name.toUpperCase()} moved ${perBtc(worst.with_move_1s)} per BTC a second later, against ${perBtc(worst.without_move_1s)} without it. ` +
+    (allLose ? "But every group still loses, so the main problem is <i>how</i> Ravi trades, not only <i>when</i>: his prices are mostly reached by moves that keep going." : "Some groups don't lose, which points to situations worth avoiding.") +
+    " Groups with fewer than 30 trades are left out of this comparison.";
+}
+
+// ---- 5. what-if
+function whatIf() {
+  const order = ["ravi", "lean_300", "ladder_600", "ladder", "chase", "rush_pull", "no_lean", "plain_255", "step_aside", "all_three"];
+  const rows = order.map(k => D.versions.find(v => v.name === k)).filter(Boolean).map(v => `<tr class="${v.name === "ravi" ? "sel" : ""}">
+    <td class="l">${VERSION_NAMES[v.name] || v.name}</td><td>${n(v.fills)}</td><td>${money(v.gross_usd)}</td><td>${money(v.net_usd)}</td>
+    <td>${v.scored_1s >= 30 ? perBtc(v.move_1s) : '<span class="dim">TOO FEW</span>'}</td><td>${v.avg_lots.toFixed(2)}</td></tr>`).join("");
+  const forks = D.forks.map(f => `<tr><td>${f.day}</td><td>${n(f.fork_at)}</td><td>${f.first_difference < 0 ? "-" : n(f.first_difference)}</td>
+    <td>${n(f.different_decisions)}</td><td>${f.original.fills}</td><td>${money(f.original.gross_usd)}</td>
+    <td>${f.forked.fills}</td><td>${money(f.forked.gross_usd)}</td><td>${money(f.forked.gross_usd - f.original.gross_usd)}</td></tr>`).join("");
+  const c = D.no_change_check;
+  return title("FRW", "WHAT-IF: SAME MARKET, DIFFERENT DECISIONS") + `
+  <h2>WHOLE DAYS: OTHER VERSIONS OF RAVI ON THE SAME ${D.days.length} RECORDED DAYS</h2>
+  <table><thead><tr><th class="l">VERSION</th><th>TRADES</th><th>BEFORE FEES</th><th>AFTER FEES</th><th>AVG 1 SEC LATER, PER BTC</th><th>AVG LOTS HELD</th></tr></thead>
+  <tbody>${rows}</tbody></table>
+  ${note(`<b>HOW TO READ IT.</b> Every version saw exactly the same market. Fewer trades can cut losses without making trades better, so the column to watch is "avg 1 sec later": closer to zero means better trades.`)}
+  ${note(versionFinding())}
+  <h2>FORKS: REWIND TO MID-DAY, CHANGE ONE THING, REPLAY THE REST</h2>
+  <table><thead><tr><th>DAY</th><th>FORK AT EVENT</th><th>FIRST DIFFERENT DECISION</th><th>DECISIONS CHANGED</th>
+  <th>ORIGINAL TRADES</th><th>ORIGINAL BEFORE FEES</th><th>FORK TRADES</th><th>FORK BEFORE FEES</th><th>DIFFERENCE</th></tr></thead>
+  <tbody>${forks}</tbody></table>
+  <pre class="${c.different_decisions === 0 ? "up" : "down"}">SAFETY CHECK  fork day ${c.day} at event ${n(c.fork_at)} with NO change: ${n(c.different_decisions)} decisions changed  ${c.different_decisions === 0 ? "PASS" : "FAIL"}</pre>
+  ${note(`<b>WHY FORKS MATTER.</b> A fork is like reloading a game save at the 30th over and trying a different plan. Ravi keeps everything he had at that moment: his stock, his read of the market. Then one setting changes, here "lean $3 instead of $1", and the rest of the real day replays. The original is still checked against the recording all the way, so the comparison is fair. Assumption: Ravi's trades are too small to have moved the market.`)}`;
+}
+
+function versionFinding() {
+  const base = D.versions.find(v => v.name === "ravi");
+  const better = D.versions.filter(v => v.name !== "ravi" && v.scored_1s >= 30 && v.move_1s > base.move_1s + 50);
+  if (!better.length) return "<b>WHAT WE FOUND.</b> No version made each trade clearly better than Ravi as built.";
+  return "<b>WHAT WE FOUND.</b> Versions whose trades were clearly better on average (by more than $0.50 per BTC): " +
+    better.map(v => `${VERSION_NAMES[v.name] || v.name} (${n(v.fills)} trades, ${perBtc(v.move_1s)})`).join("; ") +
+    `. Ravi as built: ${n(base.fills)} trades, ${perBtc(base.move_1s)}. A version with far fewer trades may just be hiding from the market, and every version still loses after fees.`;
+}
+
+// ---- 6. how it works
+function how() {
+  return title("FRH", "HOW IT WORKS") + `<pre class="ticket">
+  LIVE MARKET (BINANCE)
+        |  trades and best prices, about 200 a second on average
+        v
+  +-------------+      every input copied      +-----------------+     +-------------+
+  |    GATE     | ---------------------------> |  SHELF IN MEMORY | --> |  LOG ON DISK |
+  | (one door)  |   market data, clock, random |  (ring buffer)   |     | sealed, CRC  |
+  +-------------+                              +-----------------+     +-------------+
+        |                                        a second worker            |
+        v                                        writes it out, so          |
+  +-------------+                                trading never waits        |
+  |    RAVI     |  decides his prices                                       |
+  +-------------+                                                           |
+                                                                            v
+                    AFTERWARDS:  REPLAY ----> POSTMORTEM ----> LABELS ----> WHAT-IF / FORK
+                                 same answer    where the      which         same day,
+                                 to the cent    money went     situations    one change
+</pre>
+  <h2>IN PLAIN WORDS</h2>
+  <table><tbody>
+  <tr><td class="l amb">RECORD</td><td class="l">Save every input to the trading system, including the time, so nothing has to be guessed later.</td></tr>
+  <tr><td class="l amb">REPLAY</td><td class="l">Re-run a saved day and prove every decision comes out identical. If one differs, show exactly which.</td></tr>
+  <tr><td class="l amb">POSTMORTEM</td><td class="l">Split the result into gap earned, price moves and fees, and score every trade by what happened next.</td></tr>
+  <tr><td class="l amb">LABELS</td><td class="l">Tag each trade with its situation, to find which situations lose money.</td></tr>
+  <tr><td class="l amb">FORK</td><td class="l">Rewind a real day to any moment, change one thing, and see how the rest would have gone.</td></tr>
+  <tr><td class="l amb">SPEED</td><td class="l">Recording adds about 42-83 billionths of a second per event, so the trading system isn't slowed down.</td></tr>
+  <tr><td class="l amb">SAFETY</td><td class="l">Every record carries a checksum. A crash or a dead feed leaves a log that still replays up to the break.</td></tr>
+  </tbody></table>
+  <h2>WORDS YOU'LL HEAR</h2>
+  <table><tbody>
+  <tr><td class="l amb">MARKET MAKER</td><td class="l">A trader who always offers to buy a little lower and sell a little higher, and keeps the gap.</td></tr>
+  <tr><td class="l amb">FAIR PRICE</td><td class="l">Halfway between the best price to buy and the best price to sell.</td></tr>
+  <tr><td class="l amb">ADVERSE SELECTION</td><td class="l">The trades you get are the ones that are bad for you.</td></tr>
+  <tr><td class="l amb">PAPER TRADE</td><td class="l">A pretend trade: we record what would have happened, with no real money.</td></tr>
+  <tr><td class="l amb">LEAN</td><td class="l">Tilting your prices towards where the crowd is pushing.</td></tr>
+  </tbody></table>`;
+}
+
+// ---- wiring
+function render() {
+  document.getElementById("keys").innerHTML = SCREENS.map(([name], i) =>
+    `<button class="${i === screen ? "on" : ""}" data-s="${i}"><b>${i + 1})</b> ${name}</button>`).join("");
+  document.getElementById("screen").innerHTML = SCREENS[screen][2]();
+  if (screen === 2) {
+    document.getElementById("fday").onchange = e => { dayFilter = +e.target.value; trade = 0; render(); };
+    document.getElementById("flabel").onchange = e => { labelFilter = e.target.value; trade = 0; render(); };
+    document.getElementById("rows").onclick = e => { const r = e.target.closest("tr"); if (r) { trade = +r.dataset.i; render(); } };
+    const sel = document.querySelector("tr.sel");
+    if (sel) sel.scrollIntoView({block: "nearest"});
+  }
+}
+document.getElementById("keys").onclick = e => { const b = e.target.closest("button"); if (b) { screen = +b.dataset.s; render(); } };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key >= "1" && e.key <= String(SCREENS.length)) { screen = +e.key - 1; render(); }
+  else if (screen === 2 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    trade = Math.max(0, Math.min(filteredTrades().length - 1, trade + (e.key === "ArrowDown" ? 1 : -1)));
+    e.preventDefault(); render();
+  } else if (screen === 2 && (e.key === "[" || e.key === "]")) {
+    dayFilter = (dayFilter + (e.key === "]" ? 1 : D.days.length)) % (D.days.length + 1); trade = 0; render();
+  }
+});
+document.getElementById("built").textContent = `DATA BUILT ${D.built}  |  ${D.days.length} DAYS  |  ${D.fills.length} TRADES`;
+render();
+</script>
+</body>
+</html>

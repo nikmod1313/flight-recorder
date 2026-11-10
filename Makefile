@@ -8,7 +8,7 @@ endif
 
 HEADERS := include/fr/flight_recorder.h tests/feed.h tests/strategies.h strategies/real_ravi.h
 
-.PHONY: all test test-small-ring test-sync-failure test-crc-match check bench bench-long clean
+.PHONY: demo all test test-small-ring test-sync-failure test-crc-match check bench bench-long clean
 all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests $(BUILD)/bench_record $(BUILD)/postmortem
 
 $(BUILD)/core.o: $(CORE) include/fr/flight_recorder.h
@@ -66,3 +66,7 @@ bench-long: $(BUILD)/bench_record
 
 clean:
 	rm -rf $(BUILD)
+
+# Rebuilds the demo screen's data from every recorded day in build/.
+demo: $(BUILD)/fr_tool $(BUILD)/postmortem
+	python3 demo/build_data.py

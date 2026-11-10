@@ -1,15 +1,19 @@
 // Postmortem: replays recorded Real Ravi days and explains where the money went.
-//   postmortem <log> [<log> ...]
+//   postmortem [--json <out>] <log> [<log> ...]
 //
 // Each log is replayed exactly, so the report is about what really happened.
 // Alongside Ravi, "shadow" strategies see the same ticks and the same recorded
 // clock, as if they had traded that day instead. Their fills use the same strict
 // rule, and assume their quotes changed nothing in the market.
 //
-// Labels and thresholds were chosen before looking at these results, so a
+// Labels and thresholds were chosen before looking at the results they judge, so a
 // label can't be picked just because it happened to fit.
+//
+// --json also writes every day, fill, label, version and the signal test to one
+// file, for a screen to show. Money is in USD, and price moves in cents per BTC.
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <deque>
 #include <limits>
@@ -24,7 +28,7 @@ using fr_ravi::RealRavi;
 using fr_ravi::Settings;
 
 constexpr uint64_t kSecond = 1'000'000'000;
-constexpr int64_t kRushTrades = 20;       // trades in the previous second
+constexpr int64_t kRushTrades = 217;      // trades in the previous second: the busiest 10% on days 1-4
 constexpr int64_t kFlowAgainstBp = 3'000;  // imbalance of 0.30
 constexpr int64_t kNearLimitLots = 4;
 constexpr uint64_t kClusterNs = kSecond;  // previous fill under a second ago
@@ -161,6 +165,42 @@ struct Tally {
     double average() const { return count ? markout / count : 0; }
 };
 
+// printf into a std::string, for building the JSON file.
+std::string format(const char* pattern, ...) {
+    char buffer[512];
+    va_list args;
+    va_start(args, pattern);
+    std::vsnprintf(buffer, sizeof buffer, pattern, args);
+    va_end(args);
+    return buffer;
+}
+
+// One fill as JSON: what happened, its labels, and the mid around it.
+std::string fill_json(const Day& day, int day_number, const Fill& f) {
+    const double mid = f.mid2 / 2.0;
+    auto move_at = [&](double seconds) {  // mid move from the fill, cents per BTC; null if outside the day
+        const uint64_t offset = static_cast<uint64_t>(std::fabs(seconds) * kSecond);
+        if (seconds < 0 && offset > f.t) return std::string("null");
+        const int64_t later = day.mid2_after(seconds < 0 ? f.t - offset : f.t + offset, 0);
+        return later < 0 ? std::string("null") : format("%.1f", later / 2.0 - mid);
+    };
+    const int64_t later1 = day.mid2_after(f.t, kSecond);
+    const int64_t later5 = day.mid2_after(f.t, 5 * kSecond);
+    std::string labels;
+    for (unsigned i = 0; i < 4; ++i) {
+        if (!(f.labels & (1u << i))) continue;
+        labels += (labels.empty() ? "\"" : ",\"") + std::string(kLabelNames[i]) + "\"";
+    }
+    std::string path;
+    for (double s : {-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0, 5.0}) path += (path.empty() ? "" : ",") + move_at(s);
+    return format("{\"day\":%d,\"t_ns\":%llu,\"side\":\"%s\",\"price\":%lld,\"mid\":%.1f,", day_number,
+                  static_cast<unsigned long long>(f.t), f.side > 0 ? "BUY" : "SELL", static_cast<long long>(f.price), mid) +
+           format("\"edge\":%.1f,\"move_1s\":%s,\"move_5s\":%s,", f.side * (mid - f.price),
+                  later1 < 0 ? "null" : format("%.1f", f.side * (later1 / 2.0 - mid)).c_str(),
+                  later5 < 0 ? "null" : format("%.1f", f.side * (later5 / 2.0 - mid)).c_str()) +
+           "\"labels\":[" + labels + "],\"path\":[" + path + "]}";
+}
+
 struct Totals {
     double gross = 0, fees = 0, captured = 0, abs_lots = 0;
     long fills = 0, events = 0, max_lots = 0;
@@ -200,8 +240,14 @@ void print_totals(const std::string& name, const Totals& t) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: postmortem <log> [<log> ...]\n");
+    std::string json_path;
+    int first_log = 1;
+    if (argc > 2 && std::string(argv[1]) == "--json") {
+        json_path = argv[2];
+        first_log = 3;
+    }
+    if (first_log >= argc) {
+        std::fprintf(stderr, "usage: postmortem [--json <out>] <log> [<log> ...]\n");
         return 64;
     }
 
@@ -243,8 +289,9 @@ int main(int argc, char** argv) {
     double sum_xy = 0, sum_x = 0, sum_y = 0, sum_xx = 0, sum_yy = 0;
     long pairs = 0;
     std::vector<int64_t> busyness;
+    std::string days_json, fills_json;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i = first_log; i < argc; ++i) {
         Day day(shadow_set);
         const fr::ReplayReport report = fr::replay_run(day, argv[i]);
         // A torn tail means the feed died: every event before the tear still replayed exactly.
@@ -260,6 +307,22 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(report.events_replayed), r.fills.size(), r.ravi.gross_pnl() / 1e5,
                     r.ravi.fees() / 1e5, r.ravi.net_pnl() / 1e5);
         score(day, r, ravi_totals, with_label, without_label);
+        const int day_number = i - first_log + 1;
+        if (!json_path.empty() && !day.mids.empty()) {
+            double spread = 0;
+            for (const Fill& f : r.fills) spread += f.side * (f.mid2 / 2.0 - static_cast<double>(f.price)) / 1e5;
+            days_json += (days_json.empty() ? "" : ",\n") +
+                         format("{\"day\":%d,\"log\":\"%s\",\"start_ns\":%llu,\"minutes\":%.1f,", day_number, argv[i],
+                                static_cast<unsigned long long>(day.mids.front().t),
+                                (day.mids.back().t - day.mids.front().t) / 60e9) +
+                         format("\"replay\":\"%s\",\"events\":%llu,\"fills\":%zu,",
+                                report.status == fr::ReplayStatus::Match ? "match" : "torn",
+                                static_cast<unsigned long long>(report.events_replayed), r.fills.size()) +
+                         format("\"spread_usd\":%.5f,\"price_moves_usd\":%.5f,\"gross_usd\":%.5f,\"fees_usd\":%.5f,\"net_usd\":%.5f}",
+                                spread, r.ravi.gross_pnl() / 1e5 - spread, r.ravi.gross_pnl() / 1e5, r.ravi.fees() / 1e5,
+                                r.ravi.net_pnl() / 1e5);
+            for (const Fill& f : r.fills) fills_json += (fills_json.empty() ? "" : ",\n") + fill_json(day, day_number, f);
+        }
         busyness.insert(busyness.end(), day.busyness.begin(), day.busyness.end());
         for (size_t s = 0; s < day.shadows.size(); ++s) score(day, day.shadows[s], shadow_totals[s], nullptr, nullptr);
 
@@ -300,5 +363,40 @@ int main(int argc, char** argv) {
     auto pct = [&](size_t p) { return busyness.empty() ? 0 : busyness[busyness.size() * p / 100]; };
     std::printf("\n== Trades in the second before each trade: median %lld, 90th percentile %lld, 99th %lld ==\n",
                 static_cast<long long>(pct(50)), static_cast<long long>(pct(90)), static_cast<long long>(pct(99)));
+
+    if (!json_path.empty()) {
+        FILE* out = std::fopen(json_path.c_str(), "w");
+        if (!out) {
+            std::perror(json_path.c_str());
+            return 1;
+        }
+        auto version = [](const std::string& name, const Totals& t) {
+            return format("{\"name\":\"%s\",\"fills\":%ld,\"gross_usd\":%.5f,\"fees_usd\":%.5f,\"net_usd\":%.5f,",
+                          name.c_str(), t.fills, t.gross, t.fees, t.gross - t.fees) +
+                   format("\"move_1s\":%.1f,\"against_1s\":%ld,\"scored_1s\":%ld,\"avg_lots\":%.2f}",
+                          t.one_second.average(), t.one_second.against, t.one_second.count,
+                          t.events ? t.abs_lots / t.events : 0);
+        };
+        std::string versions = version("ravi", ravi_totals);
+        for (size_t v = 0; v < shadow_set.size(); ++v) versions += ",\n" + version(shadow_set[v].name, shadow_totals[v]);
+        std::string labels;
+        for (unsigned i = 0; i < 4; ++i) {
+            labels += (i ? ",\n" : "") +
+                      format("{\"name\":\"%s\",\"with_fills\":%ld,\"with_move_1s\":%.1f,\"with_against\":%ld,",
+                             kLabelNames[i], with_label[i].count, with_label[i].average(), with_label[i].against) +
+                      format("\"without_fills\":%ld,\"without_move_1s\":%.1f,\"without_against\":%ld}",
+                             without_label[i].count, without_label[i].average(), without_label[i].against);
+        }
+        std::fprintf(out, "{\"days\":[\n%s],\n\"fills\":[\n%s],\n\"labels\":[\n%s],\n\"versions\":[\n%s],\n",
+                     days_json.c_str(), fills_json.c_str(), labels.c_str(), versions.c_str());
+        std::fprintf(out,
+                     "\"signal\":{\"buyers_pushing\":{\"trades\":%ld,\"move_1s\":%.1f},\"balanced\":{\"trades\":%ld,"
+                     "\"move_1s\":%.1f},\"sellers_pushing\":{\"trades\":%ld,\"move_1s\":%.1f},\"correlation\":%.3f},\n",
+                     flow_up.count, flow_up.average(), flow_middle.count, flow_middle.average(), flow_down.count,
+                     flow_down.average(), corr);
+        std::fprintf(out, "\"busyness\":{\"median\":%lld,\"p90\":%lld,\"p99\":%lld}}\n",
+                     static_cast<long long>(pct(50)), static_cast<long long>(pct(90)), static_cast<long long>(pct(99)));
+        std::fclose(out);
+    }
     return 0;
 }
