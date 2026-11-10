@@ -15,6 +15,8 @@ struct Tick {
     int64_t side;      // who started the trade: +1 buyer, -1 seller, 0 a book update
     int64_t best_bid;  // the highest price anyone will pay right now
     int64_t best_ask;  // the lowest price anyone will accept right now
+    int64_t bid_qty;   // how much is waiting at best_bid; 0 if unknown, as in FRLOG01 logs
+    int64_t ask_qty;   // how much is waiting at best_ask; 0 if unknown
 };
 
 class TickSource {

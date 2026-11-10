@@ -106,7 +106,7 @@ build/fr_tool replay clean run.log 0
 | `strategies/real_ravi.h` | Real Ravi, a paper market maker: no order ever leaves this file |
 | `tests/strategies.h` | The toy strategy, planted leaks and a crash |
 | `tests/fr_tool.cpp` | Runs one record or replay as its own process |
-| `tests/run_tests.cpp` | The 38 black-box tests |
+| `tests/run_tests.cpp` | The 41 black-box tests |
 | `tests/ravi_tests.cpp` | Unit tests for Real Ravi's rules |
 | `tools/postmortem.cpp` | Replays saved Ravi days: labels, the signal test and shadow traders |
 | `tests/bench_record.cpp` | The speed test |
@@ -363,9 +363,24 @@ On fresh days 8-10 (2026-11-09), recorded after every setting was fixed: Ravi �
 
 `t_ns` comes from the machine's steady clock, so it only means something relative to its day's `start_ns`. The `rush` label now means the busiest 10% of moments on days 1-4 (217+ trades in the last second).
 
+### Queue sizes and the worth-it test (2026-11-10)
+
+Logs are now `FRLOG02`: the tick adds `bid_qty` and `ask_qty`, the sizes waiting at the best prices, so records are 16 bytes longer. `FRLOG01` logs still replay, with queue sizes read as 0. `tests/fixtures/v1_ravi.log` proves it.
+
+On 3 fresh days with queue sizes, queue imbalance predicted the next-second move slightly better than the crowd signal (correlation 0.68 against 0.64). But a $3 queue lean made each trade slightly worse (−$6.78 per BTC across 32 trades, against Ravi's −$6.24). The $3 crowd lean was best again (−$5.09).
+
+`build/worth_it <logs>` asks whether forking beats a backtest started fresh at the same moment. At 40 moments across 10 days, for "lean $3 instead of $1":
+
+| Window | Fork vs fresh answer, gap as share of the effect | Same answer on whether it helped |
+| --- | --- | --- |
+| To the end of the day | 22% | 40 of 40 |
+| First 60 seconds | 89% | 26 of 36 |
+
+A fresh start took a median of 126 s to quote like the real Ravi. So forking matters for questions about the minutes after a real moment, and adds little for whole-day questions.
+
 ## Tests
 
-`make check` runs the 38 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
+`make check` runs the 41 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
 
 ### Replay
 

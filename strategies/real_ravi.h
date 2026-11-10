@@ -34,6 +34,7 @@ struct Settings {
     uint64_t chase_ns = 3 * kNanosPerSecond;  // and for this long
     int64_t ladder_cents = 0;              // after a fill, the side hit stays at least this far past the fill price; 0 is off
     uint64_t ladder_ns = 3 * kNanosPerSecond;  // and for this long after each fill
+    int64_t queue_lean_cents = 0;          // shift both quotes this far towards the thinner queue, at most; 0 is off
 };
 
 struct Quotes {
@@ -98,6 +99,13 @@ public:
             if (quotes_.bid >= best_ask) quotes_.bid = best_ask - 1;  // still never cross
             if (quotes_.ask <= best_bid) quotes_.ask = best_bid + 1;
         }
+        if (s_.queue_lean_cents > 0) {  // a thin ask queue means the price will probably rise
+            const int64_t shift = s_.queue_lean_cents * queue_imbalance_bp(tick) / 10'000;
+            quotes_.bid += shift;
+            quotes_.ask += shift;
+            if (quotes_.bid >= best_ask) quotes_.bid = best_ask - 1;  // still never cross
+            if (quotes_.ask <= best_bid) quotes_.ask = best_bid + 1;
+        }
         if (s_.ladder_cents > 0) {  // after selling at P, sell no lower than P + step for a while; buying mirrors it
             if (now < ask_floor_until_ && quotes_.ask < ask_floor_) quotes_.ask = ask_floor_;
             if (now < bid_cap_until_ && quotes_.bid > bid_cap_) quotes_.bid = bid_cap_;
@@ -122,6 +130,12 @@ public:
     // For forks: the same Ravi, in the same state, from here on with new settings.
     void change_settings(const Settings& settings) { s_ = settings; }
     const Settings& settings() const { return s_; }
+
+    // From -10,000 (only sellers queuing at the best price) to +10,000 (only buyers). 0 if sizes are unknown.
+    static int64_t queue_imbalance_bp(const fr::Tick& tick) {
+        const int64_t bid = tick.bid_qty / kUnitsPerCent, ask = tick.ask_qty / kUnitsPerCent;  // in units of 0.01 BTC
+        return bid + ask == 0 ? 0 : (bid - ask) * 10'000 / (bid + ask);
+    }
 
     int64_t imbalance_bp() const { return volume_ == 0 ? 0 : flow_ * 10'000 / volume_; }
     int64_t gross_pnl() const { return cash_ + lots_ * mark_; }  // mark to market

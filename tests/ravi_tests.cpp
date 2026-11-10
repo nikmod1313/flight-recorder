@@ -26,9 +26,9 @@ public:
 
 constexpr int64_t cents(int64_t c) { return c * fr_ravi::kUnitsPerCent; }
 
-fr::Tick book(int64_t bid, int64_t ask) { return {0, 0, 0, 0, cents(bid), cents(ask)}; }
+fr::Tick book(int64_t bid, int64_t ask) { return {0, 0, 0, 0, cents(bid), cents(ask), 0, 0}; }
 fr::Tick trade(int64_t side, int64_t price, int64_t bid, int64_t ask) {
-    return {0, cents(price), 100'000'000, side, cents(bid), cents(ask)};
+    return {0, cents(price), 100'000'000, side, cents(bid), cents(ask), 0, 0};
 }
 
 // The numbers from the strategy doc: mid $78,464.00, bid $78,460.13, ask $78,463.87.
@@ -244,6 +244,26 @@ void ladder_mirrors_for_buying() {
     check(ravi.quotes().ask == plain.quotes().ask, "ladder: after buying, the ask side is left alone");
 }
 
+void queue_lean_follows_the_thinner_queue() {
+    Settings s;
+    s.queue_lean_cents = 300;
+    RealRavi ravi(s);
+    RealRavi plain;
+    TestGate gate;
+    fr::Tick thin_ask = book(1'000'000, 1'000'800);
+    thin_ask.bid_qty = 900'000'000;  // 9 BTC waiting to buy
+    thin_ask.ask_qty = 100'000'000;  // 1 BTC waiting to sell: a rise is more likely
+    ravi.on_tick(thin_ask, gate);
+    plain.on_tick(thin_ask, gate);
+    check(RealRavi::queue_imbalance_bp(thin_ask) == 8'000, "queue imbalance: 9 against 1 is +0.80");
+    check(ravi.quotes().bid == plain.quotes().bid + 240 && ravi.quotes().ask == plain.quotes().ask + 240,
+          "queue lean: both quotes move up $2.40 when buyers queue 9 to 1");
+    fr::Tick unknown = book(1'000'000, 1'000'800);  // an FRLOG01 tick: no sizes
+    ravi.on_tick(unknown, gate);
+    plain.on_tick(unknown, gate);
+    check(ravi.quotes().ask == plain.quotes().ask, "queue lean: no shift when sizes are unknown");
+}
+
 }  // namespace
 
 int main() {
@@ -265,6 +285,7 @@ int main() {
     chase_shifts_quotes_after_a_fill();
     ladder_steps_the_hit_side_only();
     ladder_mirrors_for_buying();
+    queue_lean_follows_the_thinner_queue();
     std::printf("%d failed\n", g_failed);
     return g_failed == 0 ? 0 : 1;
 }

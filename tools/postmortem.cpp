@@ -88,6 +88,7 @@ struct Day final : fr::Strategy {
     std::vector<Trader> shadows;
     std::vector<Point> mids;
     std::vector<Point> trade_imbalance;  // imbalance_bp before each trade, stored in mid2
+    std::vector<Point> queue_imbalance;  // queue imbalance at each trade, stored in mid2; only when sizes are known
     std::deque<uint64_t> recent_trades;
     std::vector<int64_t> busyness;  // trades in the previous second, seen at each trade
     uint64_t last_fill_t = 0;
@@ -135,6 +136,7 @@ struct Day final : fr::Strategy {
 
         if (tick.side != 0) {
             trade_imbalance.push_back({t, imbalance});
+            if (tick.bid_qty + tick.ask_qty > 0) queue_imbalance.push_back({t, RealRavi::queue_imbalance_bp(tick)});
             busyness.push_back(static_cast<int64_t>(recent_trades.size()));
             recent_trades.push_back(t);
         }
@@ -276,11 +278,17 @@ int main(int argc, char** argv) {
     ladder.ladder_cents = 300;
     Settings ladder_600 = ladder;  // the same idea with a $6 step
     ladder_600.ladder_cents = 600;
+    // Set on 2026-11-10 before days 11-13, the first with queue sizes, were looked at.
+    Settings queue_300;
+    queue_300.queue_lean_cents = 300;
+    Settings both_300 = lean_300;
+    both_300.queue_lean_cents = 300;
     const std::vector<Trader> shadow_set = {Trader("plain_255", plain), Trader("no_lean", no_lean),
                                             Trader("step_aside", step_aside), Trader("lean_300", lean_300),
                                             Trader("rush_pull", rush_pull), Trader("all_three", all_three),
                                             Trader("chase", chase), Trader("ladder", ladder),
-                                            Trader("ladder_600", ladder_600)};
+                                            Trader("ladder_600", ladder_600), Trader("queue_300", queue_300),
+                                            Trader("both_300", both_300)};
 
     Totals ravi_totals;
     std::vector<Totals> shadow_totals(shadow_set.size());
@@ -288,6 +296,9 @@ int main(int argc, char** argv) {
     Tally flow_up, flow_down, flow_middle;  // next-second mid move after a trade, by imbalance
     double sum_xy = 0, sum_x = 0, sum_y = 0, sum_xx = 0, sum_yy = 0;
     long pairs = 0;
+    Tally queue_up, queue_down, queue_middle;
+    double q_xy = 0, q_x = 0, q_y = 0, q_xx = 0, q_yy = 0;
+    long q_pairs = 0;
     std::vector<int64_t> busyness;
     std::string days_json, fills_json;
 
@@ -337,6 +348,17 @@ int main(int argc, char** argv) {
             sum_x += x; sum_y += move; sum_xy += x * move; sum_xx += x * x; sum_yy += move * move;
             ++pairs;
         }
+        // The same test for the queues at the best prices: a thin ask queue should come before a rise.
+        for (const Point& p : day.queue_imbalance) {
+            const int64_t before = day.mid2_after(p.t, 0);
+            const int64_t later = day.mid2_after(p.t, kSecond);
+            if (before < 0 || later < 0) continue;
+            const double move = (later - before) / 2.0;
+            const double x = p.mid2 / 10'000.0;
+            (p.mid2 > kFlowAgainstBp ? queue_up : p.mid2 < -kFlowAgainstBp ? queue_down : queue_middle).add(move);
+            q_x += x; q_y += move; q_xy += x * move; q_xx += x * x; q_yy += move * move;
+            ++q_pairs;
+        }
     }
 
     std::printf("\n== All days: where the money went (USD; trades are paper fills) ==\n");
@@ -358,6 +380,17 @@ int main(int argc, char** argv) {
     const double corr = (n * sum_xy - sum_x * sum_y) /
                         std::sqrt((n * sum_xx - sum_x * sum_x) * (n * sum_yy - sum_y * sum_y));
     std::printf("correlation of imbalance with the next-second move: %.3f over %ld trades (windows overlap)\n", corr, pairs);
+
+    double queue_corr = 0;
+    if (q_pairs > 1) {
+        const double qn = static_cast<double>(q_pairs);
+        queue_corr = (qn * q_xy - q_x * q_y) / std::sqrt((qn * q_xx - q_x * q_x) * (qn * q_yy - q_y * q_y));
+        std::printf("\n== Queue signal: mid move 1 s after a trade, by queue imbalance at the best prices, cents per BTC ==\n");
+        std::printf("buyers queuing (> +0.30):  %7ld trades, average move %+.3f\n", queue_up.count, queue_up.average());
+        std::printf("balanced:                  %7ld trades, average move %+.3f\n", queue_middle.count, queue_middle.average());
+        std::printf("sellers queuing (< -0.30): %7ld trades, average move %+.3f\n", queue_down.count, queue_down.average());
+        std::printf("correlation of queue imbalance with the next-second move: %.3f over %ld trades\n", queue_corr, q_pairs);
+    }
 
     std::sort(busyness.begin(), busyness.end());
     auto pct = [&](size_t p) { return busyness.empty() ? 0 : busyness[busyness.size() * p / 100]; };
@@ -394,6 +427,11 @@ int main(int argc, char** argv) {
                      "\"move_1s\":%.1f},\"sellers_pushing\":{\"trades\":%ld,\"move_1s\":%.1f},\"correlation\":%.3f},\n",
                      flow_up.count, flow_up.average(), flow_middle.count, flow_middle.average(), flow_down.count,
                      flow_down.average(), corr);
+        std::fprintf(out,
+                     "\"queue_signal\":{\"trades\":%ld,\"buyers_queuing\":{\"trades\":%ld,\"move_1s\":%.1f},\"balanced\":{\"trades\":%ld,"
+                     "\"move_1s\":%.1f},\"sellers_queuing\":{\"trades\":%ld,\"move_1s\":%.1f},\"correlation\":%.3f},\n",
+                     q_pairs, queue_up.count, queue_up.average(), queue_middle.count, queue_middle.average(), queue_down.count,
+                     queue_down.average(), queue_corr);
         std::fprintf(out, "\"busyness\":{\"median\":%lld,\"p90\":%lld,\"p99\":%lld}}\n",
                      static_cast<long long>(pct(50)), static_cast<long long>(pct(90)), static_cast<long long>(pct(99)));
         std::fclose(out);

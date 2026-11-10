@@ -9,7 +9,7 @@ endif
 HEADERS := include/fr/flight_recorder.h tests/feed.h tests/strategies.h strategies/real_ravi.h
 
 .PHONY: demo all test test-small-ring test-sync-failure test-crc-match check bench bench-long clean
-all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests $(BUILD)/bench_record $(BUILD)/postmortem
+all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests $(BUILD)/bench_record $(BUILD)/postmortem $(BUILD)/worth_it
 
 $(BUILD)/core.o: $(CORE) include/fr/flight_recorder.h
 	@mkdir -p $(BUILD)
@@ -27,6 +27,9 @@ $(BUILD)/bench_record: tests/bench_record.cpp $(BUILD)/core.o $(HEADERS)
 
 $(BUILD)/postmortem: tools/postmortem.cpp $(BUILD)/core.o $(HEADERS)
 	$(CXX) $(CXXFLAGS) tools/postmortem.cpp $(BUILD)/core.o -o $@
+
+$(BUILD)/worth_it: tools/worth_it.cpp $(BUILD)/core.o $(HEADERS)
+	$(CXX) $(CXXFLAGS) tools/worth_it.cpp $(BUILD)/core.o -o $@
 
 $(BUILD)/ravi_tests: tests/ravi_tests.cpp $(HEADERS)
 	@mkdir -p $(BUILD)

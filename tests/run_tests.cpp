@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "fr/flight_recorder.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -29,6 +31,9 @@ struct Replay {
     long long events = -1;
     long long first = -1;
 };
+
+// One record from the clean strategy: length, tick, input count, its two inputs, hash, crc.
+constexpr size_t kCleanRecordBytes = 4 + sizeof(fr::Tick) + 4 + 2 * 8 + 8 + 4;
 
 std::string g_tool;
 fs::path g_dir;
@@ -300,7 +305,7 @@ void expect_damage_reported(const Replay& r, long long most_events, const std::s
 
 void flipped_byte_is_never_trusted() {
     const uint64_t events = 2000;
-    const uintmax_t header = 8, record_bytes = 84, footer = 16;
+    const uintmax_t header = 8, record_bytes = kCleanRecordBytes, footer = 16;
     const fs::path log = new_log();
     expect_recorded(record("clean", log, events));
     const uintmax_t size = fs::file_size(log);
@@ -349,15 +354,15 @@ void bytes_after_the_footer_are_corrupt() {
 }
 
 void damaged_length_mid_log_is_corrupt() {
-    expect_corrupt([](std::string& b) { b[8 + 84 * 10 + 3] ^= 0x40; }, 10, "huge length at record 10");
+    expect_corrupt([](std::string& b) { b[8 + kCleanRecordBytes * 10 + 3] ^= 0x40; }, 10, "huge length at record 10");
 }
 
 void removed_record_is_corrupt() {
-    expect_corrupt([](std::string& b) { b.erase(8 + 84 * 5, 84); }, 5, "record 5 removed");
+    expect_corrupt([](std::string& b) { b.erase(8 + kCleanRecordBytes * 5, kCleanRecordBytes); }, 5, "record 5 removed");
 }
 
 void removed_last_record_is_corrupt() {
-    expect_corrupt([](std::string& b) { b.erase(8 + 84 * 99, 84); }, 99, "last record removed");
+    expect_corrupt([](std::string& b) { b.erase(8 + kCleanRecordBytes * 99, kCleanRecordBytes); }, 99, "last record removed");
 }
 
 void zeroed_tail_is_reported() {  // a power cut can leave blocks of zeros, not a clean cut
@@ -457,6 +462,30 @@ void stopwatch_leak_is_caught_once_seconds_pass() {
     }
 }
 
+// tests/fixtures/v1_ravi.log was recorded before queue sizes existed (FRLOG01, 48-byte ticks).
+void old_format_log_still_replays() {
+    const Result r = tool("replay ravi tests/fixtures/v1_ravi.log 0");
+    expect(r.out.find("status=match events=2000") != std::string::npos, "FRLOG01 log: " + r.out);
+    expect(r.out.find("ravi fills=1 lots=1 most_lots=1 gross_usd=0.00023 fees_usd=0.07800") != std::string::npos,
+           "FRLOG01 day changed: " + r.out);
+}
+
+void queue_sizes_are_recorded_and_replayed() {
+    const fs::path log = new_log();
+    expect_recorded(record_feed("printf '100 5 1 99 101 900 100\\n0 0 0 99 101 40 60\\nend\\n'", "clean", log));
+    expect_match(replay("clean", log), 2);
+    std::ifstream in(log, std::ios::binary);
+    char magic[8] = {};
+    in.read(magic, sizeof magic);
+    expect(std::string(magic) == "FRLOG02", "new logs must say FRLOG02, got " + std::string(magic));
+}
+
+void six_field_feed_line_is_refused() {
+    const fs::path log = new_log();
+    const Result r = record_lines("100 5 1 99 101 900\\nend\\n", log);
+    expect(r.exit_code == 2, "a line with only one queue size must stop the run, exit " + std::to_string(r.exit_code));
+}
+
 void streamed_feed_replays_from_the_log_alone() {
     const fs::path log = new_log();
     expect_recorded(record_lines("100 5 1 99 101\\n101 7 -1 100 102\\n0 0 0 99 100\\nend\\n", log));
@@ -536,6 +565,9 @@ int main(int argc, char** argv) {
         {"fork_must_match_before_its_point", fork_must_match_before_its_point},
         {"fork_that_needs_more_inputs_fails_loudly", fork_that_needs_more_inputs_fails_loudly},
         {"fork_with_an_unknown_setting_fails", fork_with_an_unknown_setting_fails},
+        {"old_format_log_still_replays", old_format_log_still_replays},
+        {"queue_sizes_are_recorded_and_replayed", queue_sizes_are_recorded_and_replayed},
+        {"six_field_feed_line_is_refused", six_field_feed_line_is_refused},
         {"empty_run_matches", empty_run_matches},
         {"wall_clock_leak_is_pinned", wall_clock_leak_is_pinned},
         {"random_leak_is_pinned", random_leak_is_pinned},

@@ -9,6 +9,9 @@
 // footer is the only proof that a run finished, so a log without it is
 // incomplete even if every record is whole. Its event count catches records
 // removed from the end.
+//
+// FRLOG02 is written now. FRLOG01 logs, from before queue sizes were added,
+// have a 48-byte tick and still replay: their queue sizes read as 0.
 #include "fr/flight_recorder.h"
 
 #include <fcntl.h>
@@ -38,10 +41,13 @@ constexpr uint32_t kEndMarker = 0xFFFFFFFFu;  // no real record is this long
 #define FR_RING_BYTES (size_t{16} << 20)
 #endif
 constexpr size_t kRingBytes = FR_RING_BYTES;  // must be a power of two
-constexpr char kMagic[8] = "FRLOG01";
+constexpr char kMagic[8] = "FRLOG02";
+constexpr char kMagicV1[8] = "FRLOG01";
+constexpr size_t kTickBytesV1 = 48;  // the tick before bid_qty and ask_qty
 constexpr auto kSyncInterval = std::chrono::milliseconds(100);
 constexpr uint32_t kCrcStart = 0xFFFFFFFFu;
 constexpr size_t kFixedRecordBytes = sizeof(Tick) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t);
+constexpr size_t kRecordBytesBesideTick = kFixedRecordBytes - sizeof(Tick);
 constexpr size_t kFooterBytes = sizeof(uint64_t) + sizeof(uint32_t);  // what follows kEndMarker
 
 [[noreturn]] void fail(const std::string& what, const std::string& path) {
@@ -445,7 +451,13 @@ ReplayStatus walk_log(const std::string& log_path, uint64_t& events, Visit&& vis
     const char* const end = log.end();
 
     if (static_cast<size_t>(end - pos) < sizeof kMagic) return ReplayStatus::TornTail;
-    if (std::memcmp(pos, kMagic, sizeof kMagic) != 0) return ReplayStatus::Corrupt;
+    size_t tick_bytes = sizeof(Tick);
+    if (std::memcmp(pos, kMagicV1, sizeof kMagicV1) == 0) {
+        tick_bytes = kTickBytesV1;
+    } else if (std::memcmp(pos, kMagic, sizeof kMagic) != 0) {
+        return ReplayStatus::Corrupt;
+    }
+    const size_t fixed_bytes = tick_bytes + kRecordBytesBesideTick;
     pos += sizeof kMagic;
 
     while (static_cast<size_t>(end - pos) >= sizeof(uint32_t)) {
@@ -460,22 +472,23 @@ ReplayStatus walk_log(const std::string& log_path, uint64_t& events, Visit&& vis
                                recorded_events == events && pos + kFooterBytes == end;
             return sound ? ReplayStatus::Match : ReplayStatus::Corrupt;
         }
-        if (length < kFixedRecordBytes || length > kRingBytes || (length - kFixedRecordBytes) % sizeof(uint64_t) != 0) {
+        if (length < fixed_bytes || length > kRingBytes || (length - fixed_bytes) % sizeof(uint64_t) != 0) {
             return ReplayStatus::Corrupt;  // no real record has this length
         }
         if (length > static_cast<size_t>(end - pos)) return ReplayStatus::TornTail;
 
         const size_t checked_bytes = length - sizeof(uint32_t);
         const uint32_t crc = ~crc32c(crc32c(kCrcStart, &length, sizeof length), pos, checked_bytes);
-        const uint32_t count = read_at<uint32_t>(pos + sizeof(Tick));
+        const uint32_t count = read_at<uint32_t>(pos + tick_bytes);
         if (crc != read_at<uint32_t>(pos + checked_bytes) ||
-            kFixedRecordBytes + size_t{count} * sizeof(uint64_t) != length) {
+            fixed_bytes + size_t{count} * sizeof(uint64_t) != length) {
             return ReplayStatus::Corrupt;
         }
 
-        const Tick tick = read_at<Tick>(pos);
+        Tick tick{};  // an FRLOG01 tick leaves the queue sizes at 0
+        std::memcpy(&tick, pos, tick_bytes);
         if (tick.seq != events) return ReplayStatus::Corrupt;  // a record is missing or out of place
-        const char* const inputs = pos + sizeof(Tick) + sizeof count;
+        const char* const inputs = pos + tick_bytes + sizeof count;
         const uint64_t recorded_hash = read_at<uint64_t>(pos + checked_bytes - sizeof(uint64_t));
         pos += length;
 

@@ -78,6 +78,7 @@ const VERSION_NAMES = {
   ravi: "RAVI AS BUILT", lean_300: "LEAN $3 INSTEAD OF $1", no_lean: "NO LEAN", plain_255: "PLAIN FIXED $2.55 GAP",
   step_aside: "STEP ASIDE IN A PUSH", rush_pull: "PULL OUT IN A RUSH", all_three: "ALL THREE TOGETHER",
   chase: "CHASE $3 AFTER A FILL", ladder: "LADDER $3 AFTER A FILL", ladder_600: "LADDER $6 AFTER A FILL",
+  queue_300: "QUEUE LEAN $3", both_300: "CROWD AND QUEUE LEANS",
 };
 const LABEL_TEXT = {
   rush: "The market was in its busiest 10% of moments (217+ trades in the last second).",
@@ -216,6 +217,7 @@ function labels() {
   <tr><td class="l">BALANCED</td><td>${n(s.balanced.trades)}</td><td>${perBtc(s.balanced.move_1s)}</td></tr>
   <tr><td class="l">SELLERS PUSHING</td><td>${n(s.sellers_pushing.trades)}</td><td>${perBtc(s.sellers_pushing.move_1s)}</td></tr>
   </tbody></table>
+  ${queueTable()}
   ${note(`<b>WHAT THIS SHOWS.</b> When buyers push, the price usually rises in the next second, and when sellers push, it usually falls (correlation ${s.correlation.toFixed(2)}, where 0 is no link and 1 is perfect). Some of this may be the feed reporting trades a moment late. Labels and this signal are fixed before looking at results, and judged on days not used to set them.`)}`;
 }
 
@@ -229,9 +231,21 @@ function labelFinding() {
     " Groups with fewer than 30 trades are left out of this comparison.";
 }
 
+function queueTable() {
+  const q = D.queue_signal;
+  if (!q || !q.trades) return "";
+  return `<h2>THE QUEUE SIGNAL: DOES A THIN QUEUE PREDICT THE NEXT SECOND?</h2>
+  <table><thead><tr><th class="l">QUEUES AT THE BEST PRICES</th><th>TRADES</th><th>FAIR PRICE 1 SEC LATER</th></tr></thead><tbody>
+  <tr><td class="l">BUYERS QUEUING, SELL SIDE THIN</td><td>${n(q.buyers_queuing.trades)}</td><td>${perBtc(q.buyers_queuing.move_1s)}</td></tr>
+  <tr><td class="l">BALANCED</td><td>${n(q.balanced.trades)}</td><td>${perBtc(q.balanced.move_1s)}</td></tr>
+  <tr><td class="l">SELLERS QUEUING, BUY SIDE THIN</td><td>${n(q.sellers_queuing.trades)}</td><td>${perBtc(q.sellers_queuing.move_1s)}</td></tr>
+  </tbody></table>
+  <div class="dim">Only days recorded with queue sizes: ${n(q.trades)} trades, correlation ${q.correlation.toFixed(2)}.</div>`;
+}
+
 // ---- 5. what-if
 function whatIf() {
-  const order = ["ravi", "lean_300", "ladder_600", "ladder", "chase", "rush_pull", "no_lean", "plain_255", "step_aside", "all_three"];
+  const order = ["ravi", "lean_300", "queue_300", "both_300", "ladder_600", "ladder", "chase", "rush_pull", "no_lean", "plain_255", "step_aside", "all_three"];
   const rows = order.map(k => D.versions.find(v => v.name === k)).filter(Boolean).map(v => `<tr class="${v.name === "ravi" ? "sel" : ""}">
     <td class="l">${VERSION_NAMES[v.name] || v.name}</td><td>${n(v.fills)}</td><td>${money(v.gross_usd)}</td><td>${money(v.net_usd)}</td>
     <td>${v.scored_1s >= 30 ? perBtc(v.move_1s) : '<span class="dim">TOO FEW</span>'}</td><td>${v.avg_lots.toFixed(2)}</td></tr>`).join("");
