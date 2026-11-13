@@ -512,6 +512,43 @@ void dump_gives_back_exactly_what_was_fed() {
     expect(dumped.exit_code == 0 && dumped.out == fed, "dump differs from the feed:\n" + dumped.out);
 }
 
+// Worked by hand. Sizes are in units of 0.01 BTC (1,000,000 raw); prices in raw units.
+//   book: bid 100 x 2.00, ask 101 x 3.00   -> probes A (bid, 2.00 ahead) and B (ask, 3.00 ahead)
+//   a seller trades 1.00 at 100             -> A touched; 1.00 still ahead of A
+//   book: bid 100 x 0.50, ask 101 x 3.00   -> 2.00 - 1.00 traded - 0.50 left = 0.50 cancelled;
+//                                              A's share is 1.00/2.00, so 0.75 ahead in the queue
+//                                              model. Probes C (bid, 0.50) and D (ask, 3.00) start.
+//   a seller trades 0.80 at 100             -> A: queue fill (0.75 used up), not certain (0.20 left).
+//                                              C: certain and queue fill (0.50 used up)
+//   a buyer trades at 102                   -> B and D: through, so filled by every rule
+void fill_rules_match_a_hand_worked_case() {
+    const fs::path log = new_log();
+    const std::string feed =
+        "book 1 1 100 200000000 101 300000000\\n"
+        "100 100000000 -1 100 101 0 0 0\\n"
+        "book 1 1 100 50000000 101 300000000\\n"
+        "100 80000000 -1 100 101 0 0 0\\n"
+        "102 10000000 1 100 101 0 0 0\\nend\\n";
+    expect_recorded(record_feed("printf '" + feed + "'", "ravi", log));
+    const fs::path csv = g_dir / "fill_hand.csv";
+    const std::string study = (fs::path(g_tool).parent_path() / "fill_study").string();
+    expect(std::system((study + " --flush " + csv.string() + " " + log.string() + " >/dev/null").c_str()) == 0,
+           "fill_study failed");
+    std::ifstream in(csv);
+    std::string line, got;
+    std::getline(in, line);  // header
+    while (std::getline(in, line)) {
+        // side, then the 1-second answer of each rule: touched, certain, strict, queue.
+        std::vector<std::string> cells;
+        std::string cell;
+        for (char c : line + ",") {
+            if (c == ',') { cells.push_back(cell); cell.clear(); } else { cell += c; }
+        }
+        got += cells[2] + ":" + cells[16] + cells[19] + cells[22] + cells[25] + " ";
+    }
+    expect(got == "1:1001 -1:1111 1:1101 -1:1111 ", "fill rules per probe (side:touched certain strict queue): " + got);
+}
+
 void bad_book_lines_are_refused() {
     for (const std::string line : {"book 2 1 99 5 101 4", "book 1 1 99 5 101", "book -1 0", "book 1 0 99 x"}) {
         const fs::path log = new_log();
@@ -618,6 +655,7 @@ int main(int argc, char** argv) {
         {"six_field_feed_line_is_refused", six_field_feed_line_is_refused},
         {"books_and_exchange_times_replay_exactly", books_and_exchange_times_replay_exactly},
         {"dump_gives_back_exactly_what_was_fed", dump_gives_back_exactly_what_was_fed},
+        {"fill_rules_match_a_hand_worked_case", fill_rules_match_a_hand_worked_case},
         {"bad_book_lines_are_refused", bad_book_lines_are_refused},
         {"oversized_book_is_refused", oversized_book_is_refused},
         {"empty_run_matches", empty_run_matches},

@@ -203,6 +203,23 @@ std::string fill_json(const Day& day, int day_number, const Fill& f) {
            "\"labels\":[" + labels + "],\"path\":[" + path + "]}";
 }
 
+// A running correlation between two series.
+struct Corr {
+    double x = 0, y = 0, xy = 0, xx = 0, yy = 0;
+    long n = 0;
+    void add(double a, double b) { x += a; y += b; xy += a * b; xx += a * a; yy += b * b; ++n; }
+    double value() const {
+        const double m = static_cast<double>(n);
+        const double d = std::sqrt((m * xx - x * x) * (m * yy - y * y));
+        return n > 1 && d > 0 ? (m * xy - x * y) / d : 0;
+    }
+};
+
+// Late news can't explain a move that starts after the news has arrived. So the
+// skip test asks whether a signal still predicts the move from 0.2 s to 1.2 s after
+// the trade, which leaves out about 90% of feed delays (see tools/lateness.cpp).
+constexpr uint64_t kSkip = 200'000'000;
+
 struct Totals {
     double gross = 0, fees = 0, captured = 0, abs_lots = 0;
     long fills = 0, events = 0, max_lots = 0;
@@ -301,6 +318,7 @@ int main(int argc, char** argv) {
     long q_pairs = 0;
     std::vector<int64_t> busyness;
     std::string days_json, fills_json;
+    Corr crowd_skip, queue_skip;
 
     for (int i = first_log; i < argc; ++i) {
         Day day(shadow_set);
@@ -347,6 +365,8 @@ int main(int argc, char** argv) {
             (p.mid2 > kFlowAgainstBp ? flow_up : p.mid2 < -kFlowAgainstBp ? flow_down : flow_middle).add(move);
             sum_x += x; sum_y += move; sum_xy += x * move; sum_xx += x * x; sum_yy += move * move;
             ++pairs;
+            const int64_t from = day.mid2_after(p.t, kSkip), to = day.mid2_after(p.t, kSkip + kSecond);
+            if (from >= 0 && to >= 0) crowd_skip.add(x, (to - from) / 2.0);
         }
         // The same test for the queues at the best prices: a thin ask queue should come before a rise.
         for (const Point& p : day.queue_imbalance) {
@@ -358,6 +378,8 @@ int main(int argc, char** argv) {
             (p.mid2 > kFlowAgainstBp ? queue_up : p.mid2 < -kFlowAgainstBp ? queue_down : queue_middle).add(move);
             q_x += x; q_y += move; q_xy += x * move; q_xx += x * x; q_yy += move * move;
             ++q_pairs;
+            const int64_t from = day.mid2_after(p.t, kSkip), to = day.mid2_after(p.t, kSkip + kSecond);
+            if (from >= 0 && to >= 0) queue_skip.add(x, (to - from) / 2.0);
         }
     }
 
@@ -391,6 +413,10 @@ int main(int argc, char** argv) {
         std::printf("sellers queuing (< -0.30): %7ld trades, average move %+.3f\n", queue_down.count, queue_down.average());
         std::printf("correlation of queue imbalance with the next-second move: %.3f over %ld trades\n", queue_corr, q_pairs);
     }
+
+    std::printf("\n== Skip test: correlation with the move from 0.2 s to 1.2 s after the trade ==\n");
+    std::printf("crowd signal: %.3f over %ld trades\n", crowd_skip.value(), crowd_skip.n);
+    if (queue_skip.n) std::printf("queue signal: %.3f over %ld trades\n", queue_skip.value(), queue_skip.n);
 
     std::sort(busyness.begin(), busyness.end());
     auto pct = [&](size_t p) { return busyness.empty() ? 0 : busyness[busyness.size() * p / 100]; };
