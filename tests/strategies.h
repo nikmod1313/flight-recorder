@@ -39,6 +39,25 @@ protected:
     uint64_t state_ = 0xCBF29CE484222325ull;
 };
 
+// Clean, but every book level and the exchange time also change its state, so a
+// book or time lost or garbled in the log must show up as a divergence.
+class BookClean final : public Clean {
+public:
+    void on_book(const fr::Book& book) override {
+        fold(book.bids.size() * 1000 + book.asks.size());
+        for (const auto* side : {&book.bids, &book.asks}) {
+            for (const fr::BookLevel& level : *side) {
+                fold(static_cast<uint64_t>(level.price));
+                fold(static_cast<uint64_t>(level.qty));
+            }
+        }
+    }
+    int64_t on_tick(const fr::Tick& tick, fr::Gate& gate) override {
+        fold(static_cast<uint64_t>(tick.exchange_ns));
+        return Clean::on_tick(tick, gate);
+    }
+};
+
 class WallClockLeak final : public Clean {
 public:
     explicit WallClockLeak(uint64_t leak_at) : leak_at_(leak_at) {}
@@ -161,6 +180,7 @@ private:
 
 inline std::unique_ptr<fr::Strategy> make_strategy(const std::string& name, uint64_t at, bool replaying) {
     if (name == "clean") return std::make_unique<Clean>();
+    if (name == "book_clean") return std::make_unique<BookClean>();
     if (name == "ravi") return std::make_unique<fr_ravi::RealRavi>();
     if (name == "ravi_stopwatch") return std::make_unique<RaviStopwatchLeak>();
     if (name == "wall_clock") return std::make_unique<WallClockLeak>(at);

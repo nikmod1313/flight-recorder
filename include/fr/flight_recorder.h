@@ -5,6 +5,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace fr {
 
@@ -17,12 +18,26 @@ struct Tick {
     int64_t best_ask;  // the lowest price anyone will accept right now
     int64_t bid_qty;   // how much is waiting at best_bid; 0 if unknown, as in FRLOG01 logs
     int64_t ask_qty;   // how much is waiting at best_ask; 0 if unknown
+    int64_t exchange_ns;  // the exchange's own time for a trade, in ns since 1970; 0 if unknown, as before FRLOG03
+};
+
+// The best levels of the order book at one moment, best price first.
+struct BookLevel {
+    int64_t price;
+    int64_t qty;
+};
+struct Book {
+    std::vector<BookLevel> bids;
+    std::vector<BookLevel> asks;
 };
 
 class TickSource {
 public:
     virtual ~TickSource() = default;
     virtual bool next(Tick& out) = 0;  // false when the feed ends
+    // The book that came with the event next() just gave, or nullptr if none did.
+    // Valid until the next call to next().
+    virtual const Book* book() const { return nullptr; }
 };
 
 // The one door. A strategy gets time and randomness only from here.
@@ -37,6 +52,8 @@ class Strategy {
 public:
     virtual ~Strategy() = default;
     virtual int64_t on_tick(const Tick& tick, Gate& gate) = 0;
+    // Called just before on_tick when the event carries a book. Most strategies ignore it.
+    virtual void on_book(const Book& book) { (void)book; }
     virtual uint64_t state_hash() const = 0;
 };
 

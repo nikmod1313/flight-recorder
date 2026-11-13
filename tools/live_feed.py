@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Streams public Binance trades and best quotes to stdout, then "end".
 
-Each line is "price qty side bid ask bid_qty ask_qty". side is +1 if a buyer started the trade,
+Each trade or best-price line is "price qty side bid ask bid_qty ask_qty exchange_ns". side is +1 if a buyer started the trade,
 -1 if a seller did, and 0 for a book update, which has no price or qty.
-bid_qty and ask_qty are how much is waiting at the best bid and ask.
+bid_qty and ask_qty are how much is waiting at the best bid and ask. exchange_ns is
+Binance's own trade time (it has a resolution of 1 ms), or 0 for a best-price update,
+which carries no time. Every 100 ms, a "book NB NA p q ..." line gives the best 20
+levels on each side, best first; --no-book leaves those out.
 Numbers are scaled by 1e8 into exact integers. Uses only the standard library.
 No account or key is needed: this is public market data.
 
@@ -44,13 +47,14 @@ def read_exact(sock, count):
     return data
 
 
-def connect(symbol):
+def connect(symbol, book):
     raw = socket.create_connection((HOST, PORT), timeout=15)
     sock = ssl.create_default_context(cafile=CA_FILE).wrap_socket(raw, server_hostname=HOST)
     key = base64.b64encode(os.urandom(16)).decode()
     sock.sendall(
         (
-            f"GET /stream?streams={symbol}@trade/{symbol}@bookTicker HTTP/1.1\r\nHost: {HOST}\r\nUpgrade: websocket\r\n"
+            f"GET /stream?streams={symbol}@trade/{symbol}@bookTicker{f'/{symbol}@depth20@100ms' if book else ''} HTTP/1.1\r\n"
+            f"Host: {HOST}\r\nUpgrade: websocket\r\n"
             f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         ).encode()
     )
@@ -98,6 +102,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="btcusdt")
     parser.add_argument("--seconds", type=float, required=True)
+    parser.add_argument("--no-book", action="store_true", help="leave out the 20-level book")
     args = parser.parse_args()
 
     events = missed = busiest_second = this_second_count = 0
@@ -105,16 +110,19 @@ def main():
     this_second = None
     deadline = time.monotonic() + args.seconds
     try:
-        sock = connect(args.symbol)
+        sock = connect(args.symbol, not args.no_book)
         sock.settimeout(30)
         bid = ask = bid_qty = ask_qty = None
         for message in messages(sock):
             wrapper = json.loads(message)
             data = wrapper["data"]
-            if wrapper["stream"].endswith("@bookTicker"):
+            if "@depth" in wrapper["stream"]:
+                levels = [(scaled(p), scaled(q)) for p, q in data["bids"]] + [(scaled(p), scaled(q)) for p, q in data["asks"]]
+                line = ("book", len(data["bids"]), len(data["asks"]), *(x for level in levels for x in level))
+            elif wrapper["stream"].endswith("@bookTicker"):
                 bid, ask = scaled(data["b"]), scaled(data["a"])
                 bid_qty, ask_qty = scaled(data["B"]), scaled(data["A"])
-                line = (0, 0, 0, bid, ask, bid_qty, ask_qty)
+                line = (0, 0, 0, bid, ask, bid_qty, ask_qty, 0)
             else:
                 if last_id is not None and data["t"] != last_id + 1:
                     missed += data["t"] - last_id - 1
@@ -122,7 +130,7 @@ def main():
                 if bid is None:
                     continue  # Ravi needs a book before a trade means anything
                 side = -1 if data["m"] else 1  # m means the buyer was waiting, so a seller started it
-                line = (scaled(data["p"]), scaled(data["q"]), side, bid, ask, bid_qty, ask_qty)
+                line = (scaled(data["p"]), scaled(data["q"]), side, bid, ask, bid_qty, ask_qty, data["T"] * 1_000_000)
             print(*line, flush=True)
 
             events += 1

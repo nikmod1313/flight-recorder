@@ -106,7 +106,7 @@ build/fr_tool replay clean run.log 0
 | `strategies/real_ravi.h` | Real Ravi, a paper market maker: no order ever leaves this file |
 | `tests/strategies.h` | The toy strategy, planted leaks and a crash |
 | `tests/fr_tool.cpp` | Runs one record or replay as its own process |
-| `tests/run_tests.cpp` | The 41 black-box tests |
+| `tests/run_tests.cpp` | The 45 black-box tests |
 | `tests/ravi_tests.cpp` | Unit tests for Real Ravi's rules |
 | `tools/postmortem.cpp` | Replays saved Ravi days: labels, the signal test and shadow traders |
 | `tests/bench_record.cpp` | The speed test |
@@ -378,9 +378,31 @@ On 3 fresh days with queue sizes, queue imbalance predicted the next-second move
 
 A fresh start took a median of 126 s to quote like the real Ravi. So forking matters for questions about the minutes after a real moment, and adds little for whole-day questions.
 
+### The full order book (FRLOG03, 2026-11-13)
+
+Logs are now `FRLOG03`. Each record can carry the best 20 levels of the order book on each side, between the tick and the input count: `[bid levels u32][ask levels u32][(price, qty) pairs]`. The tick gains `exchange_ns`, Binance's own trade time, so feed lateness can be measured. Strategies receive the book through `Strategy::on_book`, just before `on_tick`. Strategies that ignore it, Ravi included, are unchanged. `FRLOG01` and `FRLOG02` logs still replay, proven by the two fixtures in `tests/fixtures/`.
+
+- `tools/live_feed.py` adds Binance's `depth20@100ms` stream as `book NB NA p q ...` lines (`--no-book` leaves it out).
+- `build/fr_tool dump <strategy> <log>` prints every event back as feed lines, and a test checks the round trip exactly.
+- `tools/record_sessions.sh <hours> <minutes> <dir>` records back-to-back live sessions and checks each replay.
+- Recording now adds 83-125 ns at p99 and 167 ns at p99.9 (2 runs, Apple M3, synthetic), against 42 and 83 ns before the book fields. That's still well inside the 1,000 ns kill line.
+
+### Next: the lie budget
+
+A backtest can overstate a strategy's profit in four ways. This branch is building the measurements for each:
+
+| Lie | How it's removed | Status |
+| --- | --- | --- |
+| Look-ahead | The gate makes it impossible | Done |
+| Fresh-start state | Forks keep the real state | Done: the first minute after a fork point was misjudged by 89% |
+| Fantasy fills | A queue-aware fill model, validated on how real queues emptied | Recording data |
+| No market reaction | A learned response model, validated on large real trades | Planned |
+
+The result will be a table showing how much each lie inflates Ravi's profit on unseen days. A model that can't beat its baseline is reported as a failure, not used.
+
 ## Tests
 
-`make check` runs the 41 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
+`make check` runs the 45 black-box tests on two ring sizes, 16 MB and 4 KB, plus Real Ravi's unit tests. Each record and each replay runs as its own process. A 120-second watchdog also turns a hang into a failure.
 
 ### Replay
 

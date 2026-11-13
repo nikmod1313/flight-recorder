@@ -32,8 +32,8 @@ struct Replay {
     long long first = -1;
 };
 
-// One record from the clean strategy: length, tick, input count, its two inputs, hash, crc.
-constexpr size_t kCleanRecordBytes = 4 + sizeof(fr::Tick) + 4 + 2 * 8 + 8 + 4;
+// One record from the clean strategy: length, tick, two empty book counts, input count, its two inputs, hash, crc.
+constexpr size_t kCleanRecordBytes = 4 + sizeof(fr::Tick) + 2 * 4 + 4 + 2 * 8 + 8 + 4;
 
 std::string g_tool;
 fs::path g_dir;
@@ -464,10 +464,12 @@ void stopwatch_leak_is_caught_once_seconds_pass() {
 
 // tests/fixtures/v1_ravi.log was recorded before queue sizes existed (FRLOG01, 48-byte ticks).
 void old_format_log_still_replays() {
-    const Result r = tool("replay ravi tests/fixtures/v1_ravi.log 0");
-    expect(r.out.find("status=match events=2000") != std::string::npos, "FRLOG01 log: " + r.out);
-    expect(r.out.find("ravi fills=1 lots=1 most_lots=1 gross_usd=0.00023 fees_usd=0.07800") != std::string::npos,
-           "FRLOG01 day changed: " + r.out);
+    for (const char* fixture : {"tests/fixtures/v1_ravi.log", "tests/fixtures/v2_ravi.log"}) {  // FRLOG01, FRLOG02
+        const Result r = tool(std::string("replay ravi ") + fixture + " 0");
+        expect(r.out.find("status=match events=2000") != std::string::npos, std::string(fixture) + ": " + r.out);
+        expect(r.out.find("ravi fills=1 lots=1 most_lots=1 gross_usd=0.00023 fees_usd=0.07800") != std::string::npos,
+               std::string(fixture) + " day changed: " + r.out);
+    }
 }
 
 void queue_sizes_are_recorded_and_replayed() {
@@ -477,7 +479,53 @@ void queue_sizes_are_recorded_and_replayed() {
     std::ifstream in(log, std::ios::binary);
     char magic[8] = {};
     in.read(magic, sizeof magic);
-    expect(std::string(magic) == "FRLOG02", "new logs must say FRLOG02, got " + std::string(magic));
+    expect(std::string(magic) == "FRLOG03", "new logs must say FRLOG03, got " + std::string(magic));
+}
+
+// A book line, a trade with the exchange's time, then a smaller book: the strategy
+// folds all of it in, so anything lost or garbled in the log diverges.
+void books_and_exchange_times_replay_exactly() {
+    const fs::path log = new_log();
+    const std::string lines =
+        "book 3 2 99 5 98 7 97 9 101 4 102 6\\n"
+        "100 5 1 99 101 5 4 1794542361972000000\\n"
+        "book 1 1 99 1 101 1\\n"
+        "0 0 0 99 101 1 1\\nend\\n";
+    expect_recorded(record_feed("printf '" + lines + "'", "book_clean", log));
+    expect_match(replay("book_clean", log), 4);
+    const Result fork = tool("fork book_clean " + log.string() + " 2 0");
+    expect(fork_status(fork.out) == "done" && field(fork.out, "different") == 0, "fork over books: " + fork.out);
+}
+
+// What goes in must come out: record feed lines, dump them back, and compare.
+void dump_gives_back_exactly_what_was_fed() {
+    const fs::path log = new_log();
+    const std::string fed =
+        "book 3 2 99 5 98 7 97 9 101 4 102 6\n"
+        "100 5 1 99 101 5 4 1794542361972000000\n"
+        "book 0 1 101 1\n"
+        "0 0 0 99 101 1 1 0\n";
+    std::string escaped;
+    for (char c : fed) escaped += c == '\n' ? std::string("\\n") : std::string(1, c);
+    expect_recorded(record_feed("printf '" + escaped + "end\\n'", "book_clean", log));
+    const Result dumped = tool("dump book_clean " + log.string());
+    expect(dumped.exit_code == 0 && dumped.out == fed, "dump differs from the feed:\n" + dumped.out);
+}
+
+void bad_book_lines_are_refused() {
+    for (const std::string line : {"book 2 1 99 5 101 4", "book 1 1 99 5 101", "book -1 0", "book 1 0 99 x"}) {
+        const fs::path log = new_log();
+        const Result r = record_feed("printf '" + line + "\\nend\\n'", "book_clean", log);
+        expect(r.exit_code == 2, "book line \"" + line + "\" must stop the run, exit " + std::to_string(r.exit_code));
+    }
+}
+
+void oversized_book_is_refused() {
+    std::string line = "book 1001 0";
+    for (int i = 0; i < 1001; ++i) line += " 99 1";
+    const fs::path log = new_log();
+    const Result r = record_feed("printf '" + line + "\\nend\\n'", "book_clean", log);
+    expect(r.exit_code == 2, "a 1001-level book side must be refused, exit " + std::to_string(r.exit_code));
 }
 
 void six_field_feed_line_is_refused() {
@@ -568,6 +616,10 @@ int main(int argc, char** argv) {
         {"old_format_log_still_replays", old_format_log_still_replays},
         {"queue_sizes_are_recorded_and_replayed", queue_sizes_are_recorded_and_replayed},
         {"six_field_feed_line_is_refused", six_field_feed_line_is_refused},
+        {"books_and_exchange_times_replay_exactly", books_and_exchange_times_replay_exactly},
+        {"dump_gives_back_exactly_what_was_fed", dump_gives_back_exactly_what_was_fed},
+        {"bad_book_lines_are_refused", bad_book_lines_are_refused},
+        {"oversized_book_is_refused", oversized_book_is_refused},
         {"empty_run_matches", empty_run_matches},
         {"wall_clock_leak_is_pinned", wall_clock_leak_is_pinned},
         {"random_leak_is_pinned", random_leak_is_pinned},

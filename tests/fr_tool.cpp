@@ -3,6 +3,7 @@
 //   fr_tool replay <strategy> <log> <at>
 //   fr_tool record-stdin <strategy> <log>
 //   fr_tool fork <strategy> <log> <fork_at> <at> [setting=value ...]
+//   fr_tool dump <strategy> <log>   prints every event back as feed lines
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -74,6 +76,41 @@ fr_ravi::Settings changed_settings(fr_ravi::Settings s, int count, char** change
     return s;
 }
 
+// Replays the log with the strategy it was recorded with, printing each event in
+// the feed's own line format, so a recording can be checked against what was fed in.
+int dump(char** argv) {
+    struct Printing final : fr::Strategy {
+        std::unique_ptr<fr::Strategy> inner;
+        void on_book(const fr::Book& book) override {
+            std::printf("book %zu %zu", book.bids.size(), book.asks.size());
+            for (const auto* side : {&book.bids, &book.asks}) {
+                for (const fr::BookLevel& l : *side) std::printf(" %lld %lld", static_cast<long long>(l.price), static_cast<long long>(l.qty));
+            }
+            std::printf("\n");
+            inner->on_book(book);
+            skip_tick = true;
+        }
+        int64_t on_tick(const fr::Tick& t, fr::Gate& g) override {
+            if (!skip_tick) {
+                std::printf("%lld %lld %lld %lld %lld %lld %lld %lld\n", static_cast<long long>(t.price),
+                            static_cast<long long>(t.qty), static_cast<long long>(t.side), static_cast<long long>(t.best_bid),
+                            static_cast<long long>(t.best_ask), static_cast<long long>(t.bid_qty),
+                            static_cast<long long>(t.ask_qty), static_cast<long long>(t.exchange_ns));
+            }
+            skip_tick = false;
+            return inner->on_tick(t, g);
+        }
+        uint64_t state_hash() const override { return inner->state_hash(); }
+        bool skip_tick = false;  // a book event's tick is made from its book, so the book line says it all
+    } printing;
+    printing.inner = fr_test::make_strategy(argv[2], 0, true);
+    if (!printing.inner) return usage();
+    const fr::ReplayReport report = fr::replay_run(printing, argv[3]);
+    std::fprintf(stderr, "status=%s events=%llu\n", status_name(report.status),
+                 static_cast<unsigned long long>(report.events_replayed));
+    return report.status == fr::ReplayStatus::Match ? 0 : 1;
+}
+
 int fork(int argc, char** argv) {
     const uint64_t fork_at = std::strtoull(argv[4], nullptr, 10);
     const uint64_t at = std::strtoull(argv[5], nullptr, 10);
@@ -121,6 +158,7 @@ int run(int argc, char** argv) {
         return 0;
     }
     if (argc >= 6 && std::string(argv[1]) == "fork") return fork(argc, argv);
+    if (argc == 4 && std::string(argv[1]) == "dump") return dump(argv);
     if (argc < 5) return usage();
     const std::string mode = argv[1];
     const bool replaying = mode == "replay";

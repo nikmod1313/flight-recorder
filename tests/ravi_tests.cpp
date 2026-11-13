@@ -26,9 +26,9 @@ public:
 
 constexpr int64_t cents(int64_t c) { return c * fr_ravi::kUnitsPerCent; }
 
-fr::Tick book(int64_t bid, int64_t ask) { return {0, 0, 0, 0, cents(bid), cents(ask), 0, 0}; }
+fr::Tick book(int64_t bid, int64_t ask) { return {0, 0, 0, 0, cents(bid), cents(ask), 0, 0, 0}; }
 fr::Tick trade(int64_t side, int64_t price, int64_t bid, int64_t ask) {
-    return {0, cents(price), 100'000'000, side, cents(bid), cents(ask), 0, 0};
+    return {0, cents(price), 100'000'000, side, cents(bid), cents(ask), 0, 0, 0};
 }
 
 // The numbers from the strategy doc: mid $78,464.00, bid $78,460.13, ask $78,463.87.
