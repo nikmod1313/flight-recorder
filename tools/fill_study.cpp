@@ -15,12 +15,16 @@
 // answers at 1, 5 and 30 seconds. Logs must replay exactly with Ravi.
 // --flush also writes probes still running when a day ends, with the answers so far
 // (for tests on short, hand-made logs).
+// A hole (holes.h: the recorder froze, as when the Mac sleeps) cuts the day in two:
+// probes still running across it are dropped, and the recent trades and mids that the
+// features use are forgotten, since nothing on the far side can be trusted to line up.
 #include <cmath>
 #include <cstdio>
 #include <deque>
 #include <string>
 #include <vector>
 
+#include "holes.h"
 #include "real_ravi.h"
 
 namespace {
@@ -58,6 +62,9 @@ struct Study final : fr::Strategy {
     std::deque<Trade> recent;
     std::deque<std::pair<uint64_t, double>> mids;  // time, mid in cents
     uint64_t rows = 0;
+    fr_holes::HoleFinder finder;
+    int holes = 0;
+    uint64_t dropped = 0;  // probes thrown away because a hole crossed them
 
     void on_book(const fr::Book& b) override {
         book = b;
@@ -76,6 +83,14 @@ struct Study final : fr::Strategy {
         const int64_t out_value = ravi.on_tick(tick, capture);
         const uint64_t t = capture.t;
 
+        if (tick.side != 0 && tick.exchange_ns > 0 &&
+            finder.on_trade(static_cast<int64_t>(t), tick.exchange_ns)) {
+            ++holes;
+            dropped += probes.size();
+            probes.clear();
+            recent.clear();
+            mids.clear();
+        }
         if (tick.side != 0) on_trade(tick, t);
         if (pending_book) {
             on_snapshot(t);
@@ -237,8 +252,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "%s: replay did not match, so it can't be used\n", argv[i]);
             return 1;
         }
-        std::printf("%s: %s, %llu events, %llu probes\n", argv[i], report.status == fr::ReplayStatus::Match ? "match" : "torn",
-                    static_cast<unsigned long long>(report.events_replayed), static_cast<unsigned long long>(study.rows));
+        std::printf("%s: %s, %llu events, %llu probes, %d holes (%llu probes dropped)\n", argv[i],
+                    report.status == fr::ReplayStatus::Match ? "match" : "torn",
+                    static_cast<unsigned long long>(report.events_replayed), static_cast<unsigned long long>(study.rows),
+                    study.holes, static_cast<unsigned long long>(study.dropped));
         total += study.rows;
     }
     std::fclose(out);

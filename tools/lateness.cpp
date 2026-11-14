@@ -7,11 +7,15 @@
 // delay. Taking the smallest gap seen in each minute as "no delay" leaves the extra
 // delay of every trade: how much later it arrived than the fastest trade around it.
 // Using a minute rather than the whole log keeps slow clock drift out of the answer.
+// A hole (holes.h: the recorder froze, as when the Mac sleeps) shifts the gap by the
+// length of the freeze, so each stretch between holes gets its own minimum and no
+// minute window reaches across a hole.
 #include <algorithm>
 #include <cstdio>
 #include <deque>
 #include <vector>
 
+#include "holes.h"
 #include "real_ravi.h"
 
 namespace {
@@ -23,12 +27,15 @@ struct Trade {
     int64_t arrival;
     int64_t gap;  // arrival - exchange time: a fixed offset plus the delay
     int busy;     // trades that arrived in the second before
+    int stretch;  // which stretch between holes it belongs to
 };
 
 struct Lateness final : fr::Strategy {
     fr_ravi::RealRavi ravi;  // the strategy the log was recorded with, so replay is checked
     std::vector<Trade> trades;
     std::deque<int64_t> last_second;
+    fr_holes::HoleFinder finder;
+    int holes = 0;
 
     int64_t on_tick(const fr::Tick& tick, fr::Gate& gate) override {
         struct Capture final : fr::Gate {
@@ -41,8 +48,12 @@ struct Lateness final : fr::Strategy {
         const int64_t out = ravi.on_tick(tick, capture);
         const int64_t t = static_cast<int64_t>(capture.t);
         if (tick.side != 0 && tick.exchange_ns > 0) {
+            if (finder.on_trade(t, tick.exchange_ns)) {
+                ++holes;
+                last_second.clear();
+            }
             while (!last_second.empty() && last_second.front() + kSecond < t) last_second.pop_front();
-            trades.push_back({t, t - tick.exchange_ns, static_cast<int>(last_second.size())});
+            trades.push_back({t, t - tick.exchange_ns, static_cast<int>(last_second.size()), holes});
             last_second.push_back(t);
         }
         return out;
@@ -77,24 +88,27 @@ int main(int argc, char** argv) {
             std::printf("%s: no trades with exchange times (recorded before FRLOG03?)\n", argv[i]);
             continue;
         }
-        // The smallest gap within a minute either side is taken as "no delay".
+        // The smallest gap within a minute either side, and within the same stretch
+        // between holes, is taken as "no delay".
         size_t lo = 0, hi = 0;
         std::deque<size_t> window;  // indexes, gaps increasing: a sliding minimum
         std::vector<double> day_delays;
         for (size_t k = 0; k < day.trades.size(); ++k) {
-            const int64_t t = day.trades[k].arrival;
-            while (hi < day.trades.size() && day.trades[hi].arrival <= t + kMinute) {
+            const Trade& now = day.trades[k];
+            const int64_t t = now.arrival;
+            while (hi < day.trades.size() && day.trades[hi].stretch == now.stretch &&
+                   day.trades[hi].arrival <= t + kMinute) {
                 while (!window.empty() && day.trades[window.back()].gap >= day.trades[hi].gap) window.pop_back();
                 window.push_back(hi++);
             }
-            while (day.trades[lo].arrival < t - kMinute) ++lo;
+            while (day.trades[lo].stretch != now.stretch || day.trades[lo].arrival < t - kMinute) ++lo;
             while (window.front() < lo) window.pop_front();
             const double delay_ms = (day.trades[k].gap - day.trades[window.front()].gap) / 1e6;
             day_delays.push_back(delay_ms);
             busy.push_back(day.trades[k].busy);
         }
-        std::printf("%s: %zu trades, extra delay median %.1f ms, p90 %.1f ms, p99 %.1f ms, worst %.1f ms\n", argv[i],
-                    day_delays.size(), percentile(day_delays, 0.5), percentile(day_delays, 0.9),
+        std::printf("%s: %d holes, %zu trades, extra delay median %.1f ms, p90 %.1f ms, p99 %.1f ms, worst %.1f ms\n", argv[i],
+                    day.holes, day_delays.size(), percentile(day_delays, 0.5), percentile(day_delays, 0.9),
                     percentile(day_delays, 0.99), percentile(day_delays, 1.0));
         all.insert(all.end(), day_delays.begin(), day_delays.end());
     }

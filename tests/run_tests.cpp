@@ -549,6 +549,54 @@ void fill_rules_match_a_hand_worked_case() {
     expect(got == "1:1001 -1:1111 1:1101 -1:1111 ", "fill rules per probe (side:touched certain strict queue): " + got);
 }
 
+// A sleeping Mac freezes the recorder; on waking, the clocks no longer line up.
+// Planted: two trades that reach us milliseconds apart but happened 600 s apart on the
+// exchange. `holes` must find exactly one hole, and fill_study must drop the four probes
+// started before it, keeping only the two started after, and `lateness` must not see
+// a 600 s delay. The same log with the trades
+// 0.5 s apart is the control: no hole, all six probes kept.
+void holes_are_found_and_cut_out_of_the_fill_study() {
+    auto run = [](const std::string& command) {
+        Result r;
+        FILE* pipe = popen((command + " 2>&1").c_str(), "r");
+        if (!pipe) return r;
+        char buffer[512];
+        while (std::fgets(buffer, sizeof buffer, pipe)) r.out += buffer;
+        const int status = pclose(pipe);
+        r.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+        return r;
+    };
+    const fs::path bin = fs::path(g_tool).parent_path();
+    for (const bool planted : {true, false}) {
+        const std::string later = planted ? "1794542961972000000" : "1794542362472000000";
+        const std::string feed =
+            "book 1 1 100 200000000 101 300000000\\n"
+            "100 100000000 -1 100 101 0 0 1794542361972000000\\n"
+            "book 1 1 100 100000000 101 300000000\\n"
+            "100 10000000 -1 100 101 0 0 " + later + "\\n"
+            "book 1 1 100 90000000 101 300000000\\n"
+            "0 0 0 100 101 0 0 0\\nend\\n";
+        const fs::path log = new_log();
+        expect_recorded(record_feed("printf '" + feed + "'", "ravi", log));
+        const Result found = run((bin / "holes").string() + " " + log.string());
+        const std::string want = planted ? "1 holes" : "0 holes";
+        expect(found.exit_code == 0 && found.out.find(want) != std::string::npos,
+               std::string(planted ? "planted" : "control") + " hole count, want " + want + ":\n" + found.out);
+        const fs::path csv = g_dir / "fill_holes.csv";
+        const Result study = run((bin / "fill_study").string() + " --flush " + csv.string() + " " + log.string());
+        const std::string rows = planted ? "2 probes," : "6 probes,";
+        expect(study.exit_code == 0 && study.out.find(rows) != std::string::npos,
+               std::string(planted ? "planted" : "control") + " probes kept, want " + rows + "\n" + study.out);
+        // Lateness must measure each side of the hole on its own: across it, the 600 s
+        // jump would look like a trade arriving 600 s late.
+        const Result late = run((bin / "lateness").string() + " " + log.string());
+        const size_t at = late.out.find("worst ");
+        const double worst = at == std::string::npos ? -1 : std::atof(late.out.c_str() + at + 6);
+        expect(late.exit_code == 0 && worst >= 0 && worst < 1000,
+               std::string(planted ? "planted" : "control") + " lateness worst should be under 1 s:\n" + late.out);
+    }
+}
+
 void bad_book_lines_are_refused() {
     for (const std::string line : {"book 2 1 99 5 101 4", "book 1 1 99 5 101", "book -1 0", "book 1 0 99 x"}) {
         const fs::path log = new_log();
@@ -656,6 +704,7 @@ int main(int argc, char** argv) {
         {"books_and_exchange_times_replay_exactly", books_and_exchange_times_replay_exactly},
         {"dump_gives_back_exactly_what_was_fed", dump_gives_back_exactly_what_was_fed},
         {"fill_rules_match_a_hand_worked_case", fill_rules_match_a_hand_worked_case},
+        {"holes_are_found_and_cut_out_of_the_fill_study", holes_are_found_and_cut_out_of_the_fill_study},
         {"bad_book_lines_are_refused", bad_book_lines_are_refused},
         {"oversized_book_is_refused", oversized_book_is_refused},
         {"empty_run_matches", empty_run_matches},

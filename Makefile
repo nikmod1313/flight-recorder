@@ -9,7 +9,7 @@ endif
 HEADERS := include/fr/flight_recorder.h tests/feed.h tests/strategies.h strategies/real_ravi.h
 
 .PHONY: demo all test test-small-ring test-sync-failure test-crc-match check bench bench-long clean
-all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests $(BUILD)/bench_record $(BUILD)/postmortem $(BUILD)/worth_it $(BUILD)/fill_study $(BUILD)/lateness
+all: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests $(BUILD)/bench_record $(BUILD)/postmortem $(BUILD)/worth_it $(BUILD)/fill_study $(BUILD)/lateness $(BUILD)/holes
 
 $(BUILD)/core.o: $(CORE) include/fr/flight_recorder.h
 	@mkdir -p $(BUILD)
@@ -28,11 +28,14 @@ $(BUILD)/bench_record: tests/bench_record.cpp $(BUILD)/core.o $(HEADERS)
 $(BUILD)/postmortem: tools/postmortem.cpp $(BUILD)/core.o $(HEADERS)
 	$(CXX) $(CXXFLAGS) tools/postmortem.cpp $(BUILD)/core.o -o $@
 
-$(BUILD)/fill_study: tools/fill_study.cpp $(BUILD)/core.o $(HEADERS)
+$(BUILD)/fill_study: tools/fill_study.cpp tools/holes.h $(BUILD)/core.o $(HEADERS)
 	$(CXX) $(CXXFLAGS) tools/fill_study.cpp $(BUILD)/core.o -o $@
 
-$(BUILD)/lateness: tools/lateness.cpp $(BUILD)/core.o $(HEADERS)
+$(BUILD)/lateness: tools/lateness.cpp tools/holes.h $(BUILD)/core.o $(HEADERS)
 	$(CXX) $(CXXFLAGS) tools/lateness.cpp $(BUILD)/core.o -o $@
+
+$(BUILD)/holes: tools/holes.cpp tools/holes.h $(BUILD)/core.o $(HEADERS)
+	$(CXX) $(CXXFLAGS) tools/holes.cpp $(BUILD)/core.o -o $@
 
 $(BUILD)/worth_it: tools/worth_it.cpp $(BUILD)/core.o $(HEADERS)
 	$(CXX) $(CXXFLAGS) tools/worth_it.cpp $(BUILD)/core.o -o $@
@@ -41,7 +44,7 @@ $(BUILD)/ravi_tests: tests/ravi_tests.cpp $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) tests/ravi_tests.cpp -o $@
 
-test: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests
+test: $(BUILD)/fr_tool $(BUILD)/run_tests $(BUILD)/ravi_tests $(BUILD)/fill_study $(BUILD)/holes $(BUILD)/lateness
 	$(BUILD)/ravi_tests
 	$(BUILD)/run_tests $(BUILD)
 
